@@ -29,7 +29,6 @@ MANIFEST
 # PyInstaller
 #  Usually these files are written by a python script, and contain the bin and data for an executable
 *.manifest
-*.spec
 
 # Installer logs
 pip-log.txt
