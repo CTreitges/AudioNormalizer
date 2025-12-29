@@ -14,22 +14,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm64, windows-latest, macos-13, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         include:
           - os: ubuntu-latest
-            artifact_name: AudioNormalizer-linux-x64
-            executable_path: dist/AudioNormalizer
-          - os: ubuntu-24.04-arm64
-            artifact_name: AudioNormalizer-linux-arm64
+            artifact_name: AudioNormalizer-linux
             executable_path: dist/AudioNormalizer
           - os: windows-latest
             artifact_name: AudioNormalizer-windows
             executable_path: dist/AudioNormalizer.exe
-          - os: macos-13
-            artifact_name: AudioNormalizer-macos-intel
-            executable_path: dist/AudioNormalizer
-          - os: macos-14
-            artifact_name: AudioNormalizer-macos-arm64
+          - os: macos-latest
+            artifact_name: AudioNormalizer-macos
             executable_path: dist/AudioNormalizer
 
     steps:
@@ -52,7 +46,7 @@ jobs:
           python -m pip install pyinstaller
 
       - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb-cursor0 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxkbcommon-x11-0
