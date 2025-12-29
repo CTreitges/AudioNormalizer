@@ -18,10 +18,21 @@ except ImportError:
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QFileDialog, QListWidget, 
-                             QProgressBar, QMessageBox, QLineEdit, QMenu, QComboBox, QGridLayout, QGroupBox)
-from PyQt6.QtCore import Qt, QMimeData, pyqtSignal, QSettings
+                             QProgressBar, QMessageBox, QLineEdit, QMenu, QComboBox, QGridLayout, QGroupBox,
+                             QDoubleSpinBox)
+from PyQt6.QtCore import Qt, QMimeData, pyqtSignal, QSettings, QRunnable, QThreadPool, QObject, QDateTime
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent, QFont, QDoubleValidator, QIcon
-from pydub import AudioSegment, effects
+
+class CustomDoubleSpinBox(QDoubleSpinBox):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+        
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.clearFocus()
+        else:
+            super().keyPressEvent(event)
 
 class DropZone(QLabel):
     clicked = pyqtSignal()
@@ -100,11 +111,151 @@ class DropZone(QLabel):
         if new_files:
             self.filesDropped.emit(new_files)
 
+class WorkerSignals(QObject):
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+class AudioWorker(QRunnable):
+    def __init__(self, task_type, file_path, **kwargs):
+        super().__init__()
+        self.task_type = task_type # "analyze" oder "normalize"
+        self.file_path = file_path
+        self.kwargs = kwargs
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            if self.task_type == "analyze":
+                result = self.analyze()
+                self.signals.finished.emit({"file": self.file_path, "stats": result})
+            elif self.task_type == "normalize":
+                self.normalize()
+                self.signals.finished.emit({"file": self.file_path, "success": True})
+        except Exception as e:
+            self.signals.error.emit(f"Fehler bei {os.path.basename(self.file_path)}: {str(e)}")
+
+    def analyze(self):
+        ffmpeg_exe = self.kwargs.get("ffmpeg_exe", "ffmpeg")
+        cmd = [
+            ffmpeg_exe, "-i", self.file_path,
+            "-af", "loudnorm=print_format=json",
+            "-f", "null", "-"
+        ]
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+        result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo, encoding='utf-8')
+        output = result.stderr
+        match = re.search(r"\{.*\}", output, re.DOTALL)
+        if match:
+            stats = json.loads(match.group(0))
+            return {
+                "lufs": float(stats["input_i"]),
+                "tp": float(stats["input_tp"])
+            }
+        raise Exception("Audio-Metadaten konnten nicht extrahiert werden.")
+
+    def normalize(self):
+        ffmpeg_exe = self.kwargs.get("ffmpeg_exe", "ffmpeg")
+        params = self.kwargs.get("params")
+        output_path = self.kwargs.get("output_path")
+        stats = self.kwargs.get("stats")
+        
+        mode = params["mode"]
+        target_peak = params["target_peak"]
+        target_lufs = params["target_lufs"]
+        target_tp = params["target_tp"]
+        target_dev = params["target_dev"]
+        ref_lufs = params["ref_lufs"]
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        actual_mode = ""
+        if mode == "Hybrid-Normalizing":
+            if stats:
+                deviation = abs(stats["lufs"] - ref_lufs)
+                actual_mode = "Loudness" if deviation >= target_dev else "Peak"
+            else:
+                actual_mode = "Loudness"
+        elif mode == "Loudness-Normalizing":
+            actual_mode = "Loudness"
+        else:
+            actual_mode = "Peak"
+
+        track_num = "0" if actual_mode == "Peak" else "1"
+
+        if actual_mode == "Peak":
+            # Peak messen (muss hier passieren da Multithreaded)
+            max_vol = self.get_peak_volume(ffmpeg_exe)
+            if max_vol is not None:
+                gain = target_peak - max_vol
+                cmd = [
+                    ffmpeg_exe, "-y", "-i", self.file_path,
+                    "-af", f"volume={gain}dB",
+                    "-map_metadata", "0",
+                    "-metadata", f"track={track_num}",
+                    output_path
+                ]
+            else:
+                raise Exception("Konnte Peak-Lautstärke nicht ermitteln.")
+        else:
+            # Loudness-Normalisierung
+            if not stats:
+                # Falls keine Stats da sind (z.B. im reinen Loudness Modus), messen wir sie jetzt
+                stats = self.analyze()
+            
+            actual_target_lufs = ref_lufs if mode == "Hybrid-Normalizing" else target_lufs
+            tp_limit = min(target_tp, target_peak) if mode == "Hybrid-Normalizing" else target_tp
+            
+            gain = actual_target_lufs - stats["lufs"]
+            max_allowed_gain = tp_limit - stats["tp"]
+            applied_gain = min(gain, max_allowed_gain)
+            
+            cmd = [
+                ffmpeg_exe, "-y", "-i", self.file_path,
+                "-af", f"volume={applied_gain}dB",
+                "-map_metadata", "0",
+                "-metadata", f"track={track_num}",
+                output_path
+            ]
+
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+        if result.returncode != 0:
+            raise Exception(f"FFmpeg Fehler: {result.stderr}")
+
+    def get_peak_volume(self, ffmpeg_exe):
+        cmd = [
+            ffmpeg_exe, "-i", self.file_path,
+            "-af", "volumedetect",
+            "-vn", "-sn", "-dn",
+            "-f", "null", "-"
+        ]
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo, encoding='utf-8')
+            output = result.stderr
+            match = re.search(r"max_volume: ([\-\d\.]+) dB", output)
+            if match:
+                return float(match.group(1))
+        except Exception:
+            pass
+        return None
+
 class NormalizerApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Audio Normalizer")
-        self.setMinimumSize(700, 600)
+        self.setMinimumSize(700, 700)
         
         # Icon setzen
         icon_path = self.get_resource_path("icon.ico")
@@ -115,6 +266,16 @@ class NormalizerApp(QMainWindow):
         self.settings = QSettings("ChrisSoftware", "AudioNormalizer")
         
         self.all_files = []
+        self.thread_pool = QThreadPool()
+        
+        # State für Multithreading
+        self.pending_tasks = 0
+        self.success_count = 0
+        self.error_count = 0
+        self.ffmpeg_error_occurred = False
+        self.analysis_results = {}
+        self.current_output_mapping = {}
+        self.current_params = {}
 
         # Stylesheet für ein modernes Design
         self.setStyleSheet("""
@@ -143,7 +304,7 @@ class NormalizerApp(QMainWindow):
                 background-color: #c8c8c8;
                 color: #a1a1a1;
             }
-            QLineEdit {
+            QLineEdit, QDoubleSpinBox {
                 padding: 8px;
                 border: 1px solid #ccc;
                 border-radius: 4px;
@@ -466,68 +627,6 @@ class NormalizerApp(QMainWindow):
         self.btn_normalize.setEnabled(False)
         self.progress_bar.setVisible(False)
 
-    def get_audio_stats(self, file_path):
-        ffmpeg_exe = AudioSegment.converter
-        if not ffmpeg_exe or not os.path.isfile(ffmpeg_exe):
-            if not shutil.which("ffmpeg"):
-                return None
-            ffmpeg_exe = "ffmpeg"
-            
-        cmd = [
-            ffmpeg_exe, "-i", file_path,
-            "-af", "loudnorm=print_format=json",
-            "-f", "null", "-"
-        ]
-        
-        startupinfo = None
-        if os.name == 'nt':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo, encoding='utf-8')
-            # FFmpeg schreibt das JSON oft in stderr bei -f null
-            output = result.stderr
-            match = re.search(r"\{.*\}", output, re.DOTALL)
-            if match:
-                stats = json.loads(match.group(0))
-                return {
-                    "lufs": float(stats["input_i"]),
-                    "tp": float(stats["input_tp"])
-                }
-        except Exception as e:
-            print(f"Fehler beim Messen von {file_path}: {e}")
-        return None
-
-    def get_peak_volume(self, file_path):
-        ffmpeg_exe = AudioSegment.converter
-        if not ffmpeg_exe or not os.path.isfile(ffmpeg_exe):
-            if not shutil.which("ffmpeg"):
-                return None
-            ffmpeg_exe = "ffmpeg"
-            
-        cmd = [
-            ffmpeg_exe, "-i", file_path,
-            "-af", "volumedetect",
-            "-vn", "-sn", "-dn",
-            "-f", "null", "-"
-        ]
-        
-        startupinfo = None
-        if os.name == 'nt':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo, encoding='utf-8')
-            output = result.stderr
-            match = re.search(r"max_volume: ([\-\d\.]+) dB", output)
-            if match:
-                return float(match.group(1))
-        except Exception as e:
-            print(f"Fehler beim Messen der Peak-Lautstärke von {file_path}: {e}")
-        return None
-
     def start_normalization(self):
         if not self.all_files:
             return
@@ -537,10 +636,8 @@ class NormalizerApp(QMainWindow):
                                                "Bitte stellen Sie sicher, dass 'audioop-lts' installiert ist.")
             return
 
-        # Einstellungen auslesen
         mode = self.combo_mode.currentText()
         
-        # Validierung für Hybrid Modus
         if mode == "Hybrid-Normalizing" and len(self.all_files) <= 1:
             QMessageBox.warning(self, "Modus nicht verfügbar", 
                                 "Der Hybrid-Modus erfordert mindestens zwei Tracks.\n"
@@ -548,203 +645,156 @@ class NormalizerApp(QMainWindow):
             return
 
         try:
-            target_peak = float(self.edit_peak.text().replace(',', '.'))
-            target_lufs = float(self.edit_lufs.text().replace(',', '.'))
-            target_tp = float(self.edit_tp.text().replace(',', '.'))
-            target_dev = float(self.edit_dev.text().replace(',', '.'))
-            
-            ref_lufs_val = self.edit_ref_lufs.text().strip().replace(',', '.')
-            ref_lufs_override = float(ref_lufs_val) if ref_lufs_val else None
+            self.current_params = {
+                "mode": mode,
+                "target_peak": float(self.edit_peak.text().replace(',', '.')),
+                "target_lufs": float(self.edit_lufs.text().replace(',', '.')),
+                "target_tp": float(self.edit_tp.text().replace(',', '.')),
+                "target_dev": float(self.edit_dev.text().replace(',', '.')),
+                "ref_lufs_override": float(self.edit_ref_lufs.text().strip().replace(',', '.')) if self.edit_ref_lufs.text().strip() else None
+            }
         except ValueError:
             QMessageBox.warning(self, "Eingabefehler", "Bitte gültige numerische Werte in den Einstellungen eingeben.")
             return
 
-        # FFmpeg Prüfung
         ffmpeg_exe = AudioSegment.converter
         is_only_wav_peak = mode == "Peak-Normalizing" and all(f.lower().endswith('.wav') for f in self.all_files)
         ffmpeg_required = not is_only_wav_peak
         
-        ffmpeg_missing = False
         if ffmpeg_required:
             if not ffmpeg_exe or not os.path.isfile(ffmpeg_exe):
                 if not shutil.which("ffmpeg"):
-                    ffmpeg_missing = True
+                    msg = "FFmpeg wurde nicht gefunden. Es wird für "
+                    if mode == "Peak-Normalizing":
+                        msg += "die Verarbeitung von Nicht-WAV Dateien "
+                    else:
+                        msg += "Loudness/Hybrid Normalisierung "
+                    msg += "benötigt.\nBitte geben Sie den Pfad zur ffmpeg.exe oben an."
+                    QMessageBox.critical(self, "Fehler", msg)
+                    return
 
-        if ffmpeg_missing:
-            msg = "FFmpeg wurde nicht gefunden. Es wird für "
-            if mode == "Peak-Normalizing":
-                msg += "die Verarbeitung von Nicht-WAV Dateien "
-            else:
-                msg += "Loudness/Hybrid Normalisierung "
-            msg += "benötigt.\nBitte geben Sie den Pfad zur ffmpeg.exe oben an."
-            QMessageBox.critical(self, "Fehler", msg)
-            self.progress_bar.setVisible(False)
-            self.btn_normalize.setEnabled(True)
-            self.btn_clear.setEnabled(True)
-            return
-
-        # Ziel-Mapping erstellen (Quelldatei -> Zielpfad)
-        output_mapping = {}
-        
+        self.current_output_mapping = {}
         if len(self.all_files) == 1:
-            # Bei einer einzelnen Datei nach Dateiname fragen
             source_path = self.all_files[0]
             ext = os.path.splitext(source_path)[1]
-            filter_str = f"Audio Files (*{ext})"
-            target_path, _ = QFileDialog.getSaveFileName(self, "Speichern unter", source_path, filter_str)
-            if not target_path:
-                return
-            output_mapping[source_path] = target_path
+            target_path, _ = QFileDialog.getSaveFileName(self, "Speichern unter", source_path, f"Audio Files (*{ext})")
+            if not target_path: return
+            self.current_output_mapping[source_path] = target_path
         else:
-            # Bei mehreren Dateien nach Zielordner fragen
-            target_dir = QFileDialog.getExistingDirectory(self, "Zielordner wählen (Neuer Ordner möglich)")
-            if not target_dir:
-                return
+            target_dir = QFileDialog.getExistingDirectory(self, "Zielordner wählen")
+            if not target_dir: return
             for f in self.all_files:
-                output_mapping[f] = os.path.join(target_dir, os.path.basename(f))
+                self.current_output_mapping[f] = os.path.join(target_dir, os.path.basename(f))
 
-        self.progress_bar.setVisible(True)
+        # UI sperren
         self.btn_normalize.setEnabled(False)
         self.btn_clear.setEnabled(False)
+        self.combo_mode.setEnabled(False)
+        self.params_widget.setEnabled(False)
+        self.drop_zone.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        
+        # State zurücksetzen
+        self.success_count = 0
+        self.error_count = 0
+        self.ffmpeg_error_occurred = False
+        self.analysis_results = {}
+        
+        # Start Phase 1 oder 2
+        if mode == "Hybrid-Normalizing" and self.current_params["ref_lufs_override"] is None:
+            self.run_analysis_phase()
+        else:
+            self.run_normalization_phase()
 
-        # Referenz-LUFS für Hybrid ermitteln
-        ref_lufs = ref_lufs_override
-        if mode == "Hybrid-Normalizing" and ref_lufs is None:
-            self.progress_bar.setMaximum(len(self.all_files))
-            self.progress_bar.setValue(0)
-            self.progress_bar.setFormat("Analysiere Playlist: %p%")
-            
-            lufs_values = []
-            for i, file_path in enumerate(self.all_files):
-                QApplication.processEvents()
-                stats = self.get_audio_stats(file_path)
-                if stats:
-                    lufs_values.append(stats["lufs"])
-                self.progress_bar.setValue(i + 1)
-                
+    def run_analysis_phase(self):
+        self.pending_tasks = len(self.all_files)
+        self.progress_bar.setMaximum(self.pending_tasks)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Analysiere Playlist: %p%")
+        
+        ffmpeg_exe = AudioSegment.converter or "ffmpeg"
+        
+        for file_path in self.all_files:
+            worker = AudioWorker("analyze", file_path, ffmpeg_exe=ffmpeg_exe)
+            worker.signals.finished.connect(self.on_analysis_finished)
+            worker.signals.error.connect(self.on_task_error)
+            self.thread_pool.start(worker)
+
+    def on_analysis_finished(self, result):
+        self.analysis_results[result["file"]] = result["stats"]
+        self.pending_tasks -= 1
+        self.progress_bar.setValue(self.progress_bar.maximum() - self.pending_tasks)
+        
+        if self.pending_tasks == 0:
+            self.run_normalization_phase()
+
+    def run_normalization_phase(self):
+        # Referenz-LUFS berechnen falls nötig
+        if self.current_params["mode"] == "Hybrid-Normalizing" and self.current_params["ref_lufs_override"] is None:
+            lufs_values = [s["lufs"] for s in self.analysis_results.values() if s]
             if lufs_values:
-                ref_lufs = sum(lufs_values) / len(lufs_values)
+                self.current_params["ref_lufs"] = sum(lufs_values) / len(lufs_values)
             else:
-                ref_lufs = target_lufs # Fallback
+                self.current_params["ref_lufs"] = self.current_params["target_lufs"]
+        else:
+            self.current_params["ref_lufs"] = self.current_params["ref_lufs_override"] or self.current_params["target_lufs"]
 
-        self.progress_bar.setMaximum(len(self.all_files))
+        self.pending_tasks = len(self.all_files)
+        self.progress_bar.setMaximum(self.pending_tasks)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Verarbeite: %p%")
+        
+        ffmpeg_exe = AudioSegment.converter or "ffmpeg"
 
-        success_count = 0
-        error_count = 0
-        ffmpeg_error = False
-
-        for i, file_path in enumerate(self.all_files):
+        for file_path in self.all_files:
             try:
-                # Update UI
-                QApplication.processEvents()
+                worker = AudioWorker("normalize", file_path, 
+                                    ffmpeg_exe=ffmpeg_exe,
+                                    params=self.current_params,
+                                    output_path=self.current_output_mapping[file_path],
+                                    stats=self.analysis_results.get(file_path))
                 
-                output_path = output_mapping[file_path]
-                os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                
-                actual_mode = ""
-                stats = None
-                
-                if mode in ["Loudness-Normalizing", "Hybrid-Normalizing"]:
-                    stats = self.get_audio_stats(file_path)
-                    
-                if mode == "Hybrid-Normalizing":
-                    if stats:
-                        deviation = abs(stats["lufs"] - ref_lufs)
-                        if deviation >= target_dev:
-                            actual_mode = "Loudness"
-                        else:
-                            actual_mode = "Peak"
-                    else:
-                        actual_mode = "Loudness" # Fallback
-                elif mode == "Loudness-Normalizing":
-                    actual_mode = "Loudness"
-                else:
-                    actual_mode = "Peak"
-
-                track_num = "0" if actual_mode == "Peak" else "1"
-                
-                # Basis FFmpeg Pfad
-                current_ffmpeg = ffmpeg_exe
-                if not current_ffmpeg or not os.path.isfile(current_ffmpeg):
-                    current_ffmpeg = "ffmpeg"
-
-                if actual_mode == "Peak":
-                    # Peak messen für Normalisierung
-                    max_vol = self.get_peak_volume(file_path)
-                    if max_vol is not None:
-                        # Gain berechnen: target_peak - current_peak
-                        gain = target_peak - max_vol
-                        cmd = [
-                            current_ffmpeg, "-y", "-i", file_path,
-                            "-af", f"volume={gain}dB",
-                            "-map_metadata", "0",
-                            "-metadata", f"track={track_num}",
-                            output_path
-                        ]
-                    else:
-                        raise Exception("Konnte Peak-Lautstärke nicht ermitteln.")
-                else:
-                    # Loudness-Normalisierung (Linearer Gain um Dynamik zu erhalten)
-                    if stats:
-                        actual_target_lufs = ref_lufs if mode == "Hybrid-Normalizing" else target_lufs
-                        # Bei Hybrid ist das TP-Limit das Minimum aus dem Peak-Ziel und dem TP-Limit
-                        tp_limit = min(target_tp, target_peak) if mode == "Hybrid-Normalizing" else target_tp
-                        
-                        # Gain berechnen, um Ziel-LUFS zu erreichen
-                        gain = actual_target_lufs - stats["lufs"]
-                        # Sicherstellen, dass True Peak nicht überschritten wird (Linearer Gain Limit)
-                        max_allowed_gain = tp_limit - stats["tp"]
-                        
-                        applied_gain = min(gain, max_allowed_gain)
-                        
-                        cmd = [
-                            current_ffmpeg, "-y", "-i", file_path,
-                            "-af", f"volume={applied_gain}dB",
-                            "-map_metadata", "0",
-                            "-metadata", f"track={track_num}",
-                            output_path
-                        ]
-                    else:
-                        # Fallback falls Messung fehlschlägt (sollte nicht passieren)
-                        lra = target_dev if mode == "Hybrid-Normalizing" else 7.0
-                        tp_val = min(target_tp, target_peak) if mode == "Hybrid-Normalizing" else target_tp
-                        actual_target_lufs = ref_lufs if mode == "Hybrid-Normalizing" else target_lufs
-                        
-                        cmd = [
-                            current_ffmpeg, "-y", "-i", file_path,
-                            "-af", f"loudnorm=I={actual_target_lufs}:TP={tp_val}:LRA={lra}",
-                            "-map_metadata", "0",
-                            "-metadata", f"track={track_num}",
-                            output_path
-                        ]
-
-                startupinfo = None
-                if os.name == 'nt':
-                    startupinfo = subprocess.STARTUPINFO()
-                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-                result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
-                if result.returncode != 0:
-                    raise Exception(f"FFmpeg Fehler: {result.stderr}")
-
-                success_count += 1
+                worker.signals.finished.connect(self.on_normalization_finished)
+                worker.signals.error.connect(self.on_task_error)
+                self.thread_pool.start(worker)
             except Exception as e:
-                print(f"Fehler bei {file_path}: {e}")
-                if "ffmpeg" in str(e).lower() or "avconv" in str(e).lower():
-                    ffmpeg_error = True
-                error_count += 1
-            
-            self.progress_bar.setValue(i + 1)
+                self.on_task_error(str(e))
 
+    def on_normalization_finished(self, result):
+        self.success_count += 1
+        self.pending_tasks -= 1
+        self.progress_bar.setValue(self.progress_bar.maximum() - self.pending_tasks)
+        
+        if self.pending_tasks == 0:
+            self.finish_normalization()
+
+    def on_task_error(self, error_msg):
+        print(error_msg)
+        if "ffmpeg" in error_msg.lower():
+            self.ffmpeg_error_occurred = True
+        self.error_count += 1
+        self.pending_tasks -= 1
+        self.progress_bar.setValue(self.progress_bar.maximum() - self.pending_tasks)
+        
+        if self.pending_tasks == 0:
+            # Falls wir in der Analyse-Phase waren, müssen wir trotzdem weitermachen oder abbrechen
+            # Wenn Analyse-Fehler, wird normalization_phase trotzdem aufgerufen wenn pending_tasks == 0
+            if self.progress_bar.format().startswith("Analysiere"):
+                self.run_normalization_phase()
+            else:
+                self.finish_normalization()
+
+    def finish_normalization(self):
         self.btn_normalize.setEnabled(True)
         self.btn_clear.setEnabled(True)
+        self.combo_mode.setEnabled(True)
+        self.params_widget.setEnabled(True)
+        self.drop_zone.setEnabled(True)
         
-        msg = f"Fertig!\nErfolgreich: {success_count}"
-        if error_count > 0:
-            msg += f"\nFehler: {error_count}"
-            if ffmpeg_error:
+        msg = f"Fertig!\nErfolgreich: {self.success_count}"
+        if self.error_count > 0:
+            msg += f"\nFehler: {self.error_count}"
+            if self.ffmpeg_error_occurred:
                 msg += "\n\nHinweis: Loudness/Hybrid-Normalisierung und FLAC-Dateien benötigen 'ffmpeg'. Bitte stelle sicher, dass der Pfad zur ffmpeg.exe oben korrekt angegeben ist."
         
         QMessageBox.information(self, "Abgeschlossen", msg)
