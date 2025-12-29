@@ -30,6 +30,8 @@ class CustomDoubleSpinBox(QDoubleSpinBox):
         
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if not self.lineEdit().text():
+                self.setValue(self.minimum())
             self.clearFocus()
         else:
             super().keyPressEvent(event)
@@ -274,6 +276,7 @@ class NormalizerApp(QMainWindow):
         
         self.all_files = []
         self.thread_pool = QThreadPool()
+        self.ffmpeg_exe_path = "ffmpeg" # Default
         
         # State für Multithreading
         self.pending_tasks = 0
@@ -316,11 +319,43 @@ class NormalizerApp(QMainWindow):
                 color: #a1a1a1;
             }
             QLineEdit, QDoubleSpinBox {
-                padding: 8px;
+                padding: 6px;
                 border: 1px solid #ccc;
                 border-radius: 4px;
                 background-color: white;
                 color: #333;
+            }
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+                width: 20px;
+                background-color: #f8f9fa;
+                border-left: 1px solid #ccc;
+            }
+            QDoubleSpinBox::up-button {
+                border-top-right-radius: 4px;
+            }
+            QDoubleSpinBox::down-button {
+                border-bottom-right-radius: 4px;
+            }
+            QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+                background-color: #e9ecef;
+            }
+            QDoubleSpinBox::up-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-bottom: 5px solid #555;
+                width: 0;
+                height: 0;
+                margin-bottom: 2px;
+            }
+            QDoubleSpinBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #555;
+                width: 0;
+                height: 0;
+                margin-top: 2px;
             }
             QLabel {
                 color: #333;
@@ -441,7 +476,7 @@ class NormalizerApp(QMainWindow):
         self.edit_peak.setRange(-100.0, 0.0)
         self.edit_peak.setDecimals(2)
         self.edit_peak.setValue(-3.0)
-        self.edit_peak.setFixedWidth(80)
+        self.edit_peak.setFixedWidth(100)
         
         # Loudness Parameter
         self.lbl_lufs = QLabel("Ziel Loudness (LUFS):")
@@ -449,14 +484,14 @@ class NormalizerApp(QMainWindow):
         self.edit_lufs.setRange(-100.0, 0.0)
         self.edit_lufs.setDecimals(2)
         self.edit_lufs.setValue(-11.0)
-        self.edit_lufs.setFixedWidth(80)
+        self.edit_lufs.setFixedWidth(100)
         
         self.lbl_tp = QLabel("Max True Peak (dB):")
         self.edit_tp = CustomDoubleSpinBox()
         self.edit_tp.setRange(-100.0, 0.0)
         self.edit_tp.setDecimals(2)
         self.edit_tp.setValue(-3.0)
-        self.edit_tp.setFixedWidth(80)
+        self.edit_tp.setFixedWidth(100)
         
         # Hybrid Parameter
         self.lbl_dev = QLabel("Max. Abweichung (dB):")
@@ -464,7 +499,7 @@ class NormalizerApp(QMainWindow):
         self.edit_dev.setRange(0.0, 20.0)
         self.edit_dev.setDecimals(2)
         self.edit_dev.setValue(3.0)
-        self.edit_dev.setFixedWidth(80)
+        self.edit_dev.setFixedWidth(100)
 
         self.lbl_ref_lufs = QLabel("Referenz LUFS (Optional):")
         self.edit_ref_lufs = CustomDoubleSpinBox()
@@ -473,7 +508,20 @@ class NormalizerApp(QMainWindow):
         self.edit_ref_lufs.setMinimum(-100.01)
         self.edit_ref_lufs.setSpecialValueText("Auto")
         self.edit_ref_lufs.setValue(-100.01)
-        self.edit_ref_lufs.setFixedWidth(80)
+        self.edit_ref_lufs.setFixedWidth(100)
+
+        # Standardwert-Hinweise
+        hint_style = "font-size: 11px; color: #777; margin-left: 2px;"
+        self.hint_peak = QLabel("(-3,0)")
+        self.hint_peak.setStyleSheet(hint_style)
+        self.hint_lufs = QLabel("(-11,0)")
+        self.hint_lufs.setStyleSheet(hint_style)
+        self.hint_tp = QLabel("(-3,0)")
+        self.hint_tp.setStyleSheet(hint_style)
+        self.hint_dev = QLabel("(3,0)")
+        self.hint_dev.setStyleSheet(hint_style)
+        self.hint_ref_lufs = QLabel("(Auto)")
+        self.hint_ref_lufs.setStyleSheet(hint_style)
 
         settings_layout.addWidget(self.params_widget)
         layout.addWidget(settings_group)
@@ -529,54 +577,79 @@ class NormalizerApp(QMainWindow):
         
         # Erst alle verstecken und aus dem Grid nehmen
         widgets = [
-            (self.lbl_peak, self.edit_peak),
-            (self.lbl_lufs, self.edit_lufs),
-            (self.lbl_tp, self.edit_tp),
-            (self.lbl_dev, self.edit_dev),
-            (self.lbl_ref_lufs, self.edit_ref_lufs)
+            (self.lbl_peak, self.edit_peak, self.hint_peak),
+            (self.lbl_lufs, self.edit_lufs, self.hint_lufs),
+            (self.lbl_tp, self.edit_tp, self.hint_tp),
+            (self.lbl_dev, self.edit_dev, self.hint_dev),
+            (self.lbl_ref_lufs, self.edit_ref_lufs, self.hint_ref_lufs)
         ]
         
-        for lbl, edit in widgets:
+        for lbl, edit, hint in widgets:
             lbl.hide()
             edit.hide()
+            hint.hide()
             self.params_grid.removeWidget(lbl)
             self.params_grid.removeWidget(edit)
+            self.params_grid.removeWidget(hint)
         
+        # Stretch zurücksetzen
+        for i in range(7):
+            self.params_grid.setColumnStretch(i, 0)
+
         if mode == "Peak-Normalizing":
             self.params_grid.addWidget(self.lbl_peak, 0, 0, Qt.AlignmentFlag.AlignLeft)
             self.params_grid.addWidget(self.edit_peak, 0, 1, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.addWidget(self.hint_peak, 0, 2, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.setColumnStretch(3, 1)
             self.lbl_peak.show()
             self.edit_peak.show()
+            self.hint_peak.show()
         elif mode == "Loudness-Normalizing":
             self.params_grid.addWidget(self.lbl_lufs, 0, 0, Qt.AlignmentFlag.AlignLeft)
             self.params_grid.addWidget(self.edit_lufs, 0, 1, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.addWidget(self.hint_lufs, 0, 2, Qt.AlignmentFlag.AlignLeft)
             self.params_grid.addWidget(self.lbl_tp, 1, 0, Qt.AlignmentFlag.AlignLeft)
             self.params_grid.addWidget(self.edit_tp, 1, 1, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.addWidget(self.hint_tp, 1, 2, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.setColumnStretch(3, 1)
             self.lbl_lufs.show()
             self.edit_lufs.show()
+            self.hint_lufs.show()
             self.lbl_tp.show()
             self.edit_tp.show()
+            self.hint_tp.show()
         elif mode == "Hybrid-Normalizing":
-            # 2x2 Layout: (Row, Col)
-            # Spalte 0/1: Links, Spalte 2/3: Rechts
+            # 3 Spalten pro Element-Gruppe (Label, Edit, Hint)
             self.params_grid.addWidget(self.lbl_peak, 0, 0, Qt.AlignmentFlag.AlignLeft)
             self.params_grid.addWidget(self.edit_peak, 0, 1, Qt.AlignmentFlag.AlignLeft)
-            self.params_grid.addWidget(self.lbl_tp, 0, 2, Qt.AlignmentFlag.AlignLeft)
-            self.params_grid.addWidget(self.edit_tp, 0, 3, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.addWidget(self.hint_peak, 0, 2, Qt.AlignmentFlag.AlignLeft)
+            
+            self.params_grid.addWidget(self.lbl_tp, 0, 3, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.addWidget(self.edit_tp, 0, 4, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.addWidget(self.hint_tp, 0, 5, Qt.AlignmentFlag.AlignLeft)
             
             self.params_grid.addWidget(self.lbl_dev, 1, 0, Qt.AlignmentFlag.AlignLeft)
             self.params_grid.addWidget(self.edit_dev, 1, 1, Qt.AlignmentFlag.AlignLeft)
-            self.params_grid.addWidget(self.lbl_ref_lufs, 1, 2, Qt.AlignmentFlag.AlignLeft)
-            self.params_grid.addWidget(self.edit_ref_lufs, 1, 3, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.addWidget(self.hint_dev, 1, 2, Qt.AlignmentFlag.AlignLeft)
             
+            self.params_grid.addWidget(self.lbl_ref_lufs, 1, 3, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.addWidget(self.edit_ref_lufs, 1, 4, Qt.AlignmentFlag.AlignLeft)
+            self.params_grid.addWidget(self.hint_ref_lufs, 1, 5, Qt.AlignmentFlag.AlignLeft)
+            
+            self.params_grid.setColumnStretch(6, 1)
+
             self.lbl_peak.show()
             self.edit_peak.show()
+            self.hint_peak.show()
             self.lbl_tp.show()
             self.edit_tp.show()
+            self.hint_tp.show()
             self.lbl_dev.show()
             self.edit_dev.show()
+            self.hint_dev.show()
             self.lbl_ref_lufs.show()
             self.edit_ref_lufs.show()
+            self.hint_ref_lufs.show()
 
     def update_ffmpeg_config(self, path):
         if not path:
@@ -585,13 +658,13 @@ class NormalizerApp(QMainWindow):
         ffmpeg_dir = ""
         path = os.path.normpath(path)
         if os.path.isfile(path):
-            AudioSegment.converter = path
+            self.ffmpeg_exe_path = path
             ffmpeg_dir = os.path.dirname(path)
         elif os.path.isdir(path):
             for exe in ["ffmpeg.exe", "ffmpeg"]:
                 potential_exe = os.path.join(path, exe)
                 if os.path.isfile(potential_exe):
-                    AudioSegment.converter = potential_exe
+                    self.ffmpeg_exe_path = potential_exe
                     ffmpeg_dir = path
                     break
         
@@ -686,7 +759,7 @@ class NormalizerApp(QMainWindow):
             QMessageBox.warning(self, "Eingabefehler", "Bitte gültige numerische Werte in den Einstellungen eingeben.")
             return
 
-        ffmpeg_exe = AudioSegment.converter
+        ffmpeg_exe = self.ffmpeg_exe_path
         is_only_wav_peak = mode == "Peak-Normalizing" and all(f.lower().endswith('.wav') for f in self.all_files)
         ffmpeg_required = not is_only_wav_peak
         
@@ -743,7 +816,7 @@ class NormalizerApp(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Analysiere Playlist: %p%")
         
-        ffmpeg_exe = AudioSegment.converter or "ffmpeg"
+        ffmpeg_exe = self.ffmpeg_exe_path or "ffmpeg"
         
         for file_path in self.all_files:
             worker = AudioWorker("analyze", file_path, ffmpeg_exe=ffmpeg_exe)
@@ -775,7 +848,7 @@ class NormalizerApp(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Verarbeite: %p%")
         
-        ffmpeg_exe = AudioSegment.converter or "ffmpeg"
+        ffmpeg_exe = self.ffmpeg_exe_path or "ffmpeg"
 
         for file_path in self.all_files:
             try:
