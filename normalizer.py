@@ -28,6 +28,14 @@ class CustomDoubleSpinBox(QDoubleSpinBox):
         super().__init__(*args, **kwargs)
         self.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
         
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.lineEdit().selectAll()
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.lineEdit().selectAll()
+
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if not self.lineEdit().text():
@@ -407,10 +415,17 @@ class NormalizerApp(QMainWindow):
             }
             QGroupBox {
                 font-weight: bold;
-                border: 1px solid #ddd;
+                border: 1px solid #bbb;
                 border-radius: 8px;
                 margin-top: 15px;
                 padding-top: 20px;
+                color: #555;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                left: 10px;
             }
         """)
 
