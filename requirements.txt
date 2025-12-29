@@ -1,2 +1,3 @@
 PyQt6
 audioop-lts
+Pillow
