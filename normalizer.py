@@ -34,6 +34,13 @@ class CustomDoubleSpinBox(QDoubleSpinBox):
         else:
             super().keyPressEvent(event)
 
+class CustomLineEdit(QLineEdit):
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.clearFocus()
+        else:
+            super().keyPressEvent(event)
+
 class DropZone(QLabel):
     clicked = pyqtSignal()
     filesDropped = pyqtSignal(list)
@@ -277,6 +284,10 @@ class NormalizerApp(QMainWindow):
         self.current_output_mapping = {}
         self.current_params = {}
 
+        # Neue State Variablen für Logging
+        self.current_target_dir = ""
+        self.current_source_folder_name = ""
+
         # Stylesheet für ein modernes Design
         self.setStyleSheet("""
             QMainWindow {
@@ -387,7 +398,7 @@ class NormalizerApp(QMainWindow):
         
         ffmpeg_input_layout = QHBoxLayout()
         ffmpeg_input_layout.setSpacing(5)
-        self.edit_ffmpeg = QLineEdit()
+        self.edit_ffmpeg = CustomLineEdit()
         self.edit_ffmpeg.setFixedHeight(30)
         self.edit_ffmpeg.setPlaceholderText("Pfad zur ffmpeg.exe...")
         # Gespeicherten Pfad laden
@@ -426,32 +437,43 @@ class NormalizerApp(QMainWindow):
 
         # Peak Parameter
         self.lbl_peak = QLabel("Ziel Peak (dB):")
-        self.edit_peak = QLineEdit("-3.0")
+        self.edit_peak = CustomDoubleSpinBox()
+        self.edit_peak.setRange(-100.0, 0.0)
+        self.edit_peak.setDecimals(2)
+        self.edit_peak.setValue(-3.0)
         self.edit_peak.setFixedWidth(80)
-        self.edit_peak.setValidator(QDoubleValidator(-100.0, 0.0, 2))
         
         # Loudness Parameter
         self.lbl_lufs = QLabel("Ziel Loudness (LUFS):")
-        self.edit_lufs = QLineEdit("-11.0")
+        self.edit_lufs = CustomDoubleSpinBox()
+        self.edit_lufs.setRange(-100.0, 0.0)
+        self.edit_lufs.setDecimals(2)
+        self.edit_lufs.setValue(-11.0)
         self.edit_lufs.setFixedWidth(80)
-        self.edit_lufs.setValidator(QDoubleValidator(-100.0, 0.0, 2))
         
         self.lbl_tp = QLabel("Max True Peak (dB):")
-        self.edit_tp = QLineEdit("-1.0")
+        self.edit_tp = CustomDoubleSpinBox()
+        self.edit_tp.setRange(-100.0, 0.0)
+        self.edit_tp.setDecimals(2)
+        self.edit_tp.setValue(-3.0)
         self.edit_tp.setFixedWidth(80)
-        self.edit_tp.setValidator(QDoubleValidator(-100.0, 0.0, 2))
         
         # Hybrid Parameter
         self.lbl_dev = QLabel("Max. Abweichung (dB):")
-        self.edit_dev = QLineEdit("3.0")
+        self.edit_dev = CustomDoubleSpinBox()
+        self.edit_dev.setRange(0.0, 20.0)
+        self.edit_dev.setDecimals(2)
+        self.edit_dev.setValue(3.0)
         self.edit_dev.setFixedWidth(80)
-        self.edit_dev.setValidator(QDoubleValidator(0.0, 20.0, 2))
 
         self.lbl_ref_lufs = QLabel("Referenz LUFS (Optional):")
-        self.edit_ref_lufs = QLineEdit("")
+        self.edit_ref_lufs = CustomDoubleSpinBox()
+        self.edit_ref_lufs.setRange(-100.01, 0.0)
+        self.edit_ref_lufs.setDecimals(2)
+        self.edit_ref_lufs.setMinimum(-100.01)
+        self.edit_ref_lufs.setSpecialValueText("Auto")
+        self.edit_ref_lufs.setValue(-100.01)
         self.edit_ref_lufs.setFixedWidth(80)
-        self.edit_ref_lufs.setPlaceholderText("Auto")
-        self.edit_ref_lufs.setValidator(QDoubleValidator(-100.0, 0.0, 2))
 
         settings_layout.addWidget(self.params_widget)
         layout.addWidget(settings_group)
@@ -604,6 +626,7 @@ class NormalizerApp(QMainWindow):
         elif action == action_folder:
             folder = QFileDialog.getExistingDirectory(self, "Ordner auswählen")
             if folder:
+                self.current_source_folder_name = os.path.basename(folder)
                 new_files = []
                 for root, dirs, files in os.walk(folder):
                     for file in files:
@@ -613,6 +636,10 @@ class NormalizerApp(QMainWindow):
                     self.add_files(new_files)
 
     def add_files(self, files):
+        if files and not self.current_source_folder_name:
+            common_path = os.path.dirname(files[0])
+            self.current_source_folder_name = os.path.basename(common_path)
+
         for f in files:
             if f not in self.all_files:
                 self.all_files.append(f)
@@ -626,6 +653,7 @@ class NormalizerApp(QMainWindow):
         self.file_list.clear()
         self.btn_normalize.setEnabled(False)
         self.progress_bar.setVisible(False)
+        self.current_source_folder_name = ""
 
     def start_normalization(self):
         if not self.all_files:
@@ -645,15 +673,16 @@ class NormalizerApp(QMainWindow):
             return
 
         try:
+            ref_val = self.edit_ref_lufs.value()
             self.current_params = {
                 "mode": mode,
-                "target_peak": float(self.edit_peak.text().replace(',', '.')),
-                "target_lufs": float(self.edit_lufs.text().replace(',', '.')),
-                "target_tp": float(self.edit_tp.text().replace(',', '.')),
-                "target_dev": float(self.edit_dev.text().replace(',', '.')),
-                "ref_lufs_override": float(self.edit_ref_lufs.text().strip().replace(',', '.')) if self.edit_ref_lufs.text().strip() else None
+                "target_peak": self.edit_peak.value(),
+                "target_lufs": self.edit_lufs.value(),
+                "target_tp": self.edit_tp.value(),
+                "target_dev": self.edit_dev.value(),
+                "ref_lufs_override": ref_val if ref_val > -100.01 else None
             }
-        except ValueError:
+        except Exception:
             QMessageBox.warning(self, "Eingabefehler", "Bitte gültige numerische Werte in den Einstellungen eingeben.")
             return
 
@@ -680,9 +709,11 @@ class NormalizerApp(QMainWindow):
             target_path, _ = QFileDialog.getSaveFileName(self, "Speichern unter", source_path, f"Audio Files (*{ext})")
             if not target_path: return
             self.current_output_mapping[source_path] = target_path
+            self.current_target_dir = os.path.dirname(target_path)
         else:
             target_dir = QFileDialog.getExistingDirectory(self, "Zielordner wählen")
             if not target_dir: return
+            self.current_target_dir = target_dir
             for f in self.all_files:
                 self.current_output_mapping[f] = os.path.join(target_dir, os.path.basename(f))
 
@@ -791,6 +822,10 @@ class NormalizerApp(QMainWindow):
         self.params_widget.setEnabled(True)
         self.drop_zone.setEnabled(True)
         
+        # Logging erstellen wenn erfolgreich
+        if self.success_count > 0 and self.current_target_dir:
+            self.create_log_file()
+
         msg = f"Fertig!\nErfolgreich: {self.success_count}"
         if self.error_count > 0:
             msg += f"\nFehler: {self.error_count}"
@@ -798,6 +833,41 @@ class NormalizerApp(QMainWindow):
                 msg += "\n\nHinweis: Loudness/Hybrid-Normalisierung und FLAC-Dateien benötigen 'ffmpeg'. Bitte stelle sicher, dass der Pfad zur ffmpeg.exe oben korrekt angegeben ist."
         
         QMessageBox.information(self, "Abgeschlossen", msg)
+
+    def create_log_file(self):
+        try:
+            now = QDateTime.currentDateTime()
+            timestamp = now.toString("dd-MM-HH-mm")
+            folder_name = self.current_source_folder_name or "Audio-Files"
+            log_filename = f"Audio-Normalizer-Log-{timestamp}-{folder_name}.txt"
+            log_path = os.path.join(self.current_target_dir, log_filename)
+            
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("Audio Normalizer Log\n")
+                f.write("====================\n\n")
+                f.write(f"Datum/Zeit: {now.toString('dd.MM.yyyy HH:mm:ss')}\n")
+                f.write(f"Modus: {self.current_params['mode']}\n")
+                
+                mode = self.current_params['mode']
+                if mode == "Peak-Normalizing":
+                    f.write(f"Ziel Peak: {self.current_params['target_peak']} dB\n")
+                elif mode == "Loudness-Normalizing":
+                    f.write(f"Ziel Loudness: {self.current_params['target_lufs']} LUFS\n")
+                    f.write(f"Max True Peak: {self.current_params['target_tp']} dB\n")
+                elif mode == "Hybrid-Normalizing":
+                    f.write(f"Ziel Peak: {self.current_params['target_peak']} dB\n")
+                    f.write(f"Max True Peak: {self.current_params['target_tp']} dB\n")
+                    f.write(f"Max. Abweichung: {self.current_params['target_dev']} dB\n")
+                    ref_lufs = self.current_params.get('ref_lufs', 0.0)
+                    f.write(f"Verwendete Referenz LUFS: {ref_lufs:.2f} LUFS\n")
+                    if self.current_params.get('ref_lufs_override') is not None:
+                        f.write(f"(Manuelle Referenz: {self.current_params['ref_lufs_override']} LUFS)\n")
+                
+                f.write("\nStatistik:\n")
+                f.write(f"Erfolgreich verarbeitet: {self.success_count}\n")
+                f.write(f"Fehler: {self.error_count}\n")
+        except Exception as e:
+            print(f"Fehler beim Erstellen der Log-Datei: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
