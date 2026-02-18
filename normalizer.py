@@ -189,6 +189,52 @@ class AudioWorker(QRunnable):
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         
+        # Ausgabeformat/Codec-Argumente vorbereiten, um Bitrate/Format der Quelle zu erhalten
+        ext = os.path.splitext(output_path)[1].lower()
+        codec_args = []
+        ainfo = self.probe_audio_params(ffmpeg_exe)
+        if ainfo:
+            ch = ainfo.get("channels") or 0
+            sr = ainfo.get("sample_rate") or 0
+            bps = ainfo.get("bits_per_sample") or 0
+            sfmt = (ainfo.get("sample_fmt") or "").lower()
+            if ext == ".wav":
+                # Passendes PCM-Format gemäß Quelle wählen
+                pcm_codec = None
+                if bps >= 32:
+                    pcm_codec = "pcm_f32le" if "flt" in sfmt else "pcm_s32le"
+                elif bps >= 24:
+                    pcm_codec = "pcm_s24le"
+                elif bps >= 16:
+                    pcm_codec = "pcm_s16le"
+                elif bps > 0:
+                    pcm_codec = "pcm_u8"
+                else:
+                    # Fallback auf sample_fmt, falls bits_per_sample fehlt
+                    if "s16" in sfmt:
+                        pcm_codec = "pcm_s16le"
+                    elif "s32" in sfmt:
+                        pcm_codec = "pcm_s32le"
+                    elif "flt" in sfmt:
+                        pcm_codec = "pcm_f32le"
+                if pcm_codec:
+                    codec_args += ["-c:a", pcm_codec]
+                if sr:
+                    codec_args += ["-ar", str(sr)]
+                if ch:
+                    codec_args += ["-ac", str(ch)]
+            elif ext == ".flac":
+                # FLAC beibehalten, SR/Kanäle übernehmen und Bit-Tiefe annähern
+                codec_args += ["-c:a", "flac"]
+                if sr:
+                    codec_args += ["-ar", str(sr)]
+                if ch:
+                    codec_args += ["-ac", str(ch)]
+                if bps >= 24:
+                    codec_args += ["-sample_fmt", "s32"]  # entspricht 24-bit FLAC-Output
+                elif bps > 0:
+                    codec_args += ["-sample_fmt", "s16"]
+
         actual_mode = ""
         if mode == "Hybrid-Normalizing":
             if stats:
@@ -211,6 +257,7 @@ class AudioWorker(QRunnable):
                 cmd = [
                     ffmpeg_exe, "-y", "-i", self.file_path,
                     "-af", f"volume={gain}dB",
+                ] + codec_args + [
                     "-map_metadata", "0",
                     "-metadata", f"track={track_num}",
                     output_path
@@ -233,6 +280,7 @@ class AudioWorker(QRunnable):
             cmd = [
                 ffmpeg_exe, "-y", "-i", self.file_path,
                 "-af", f"volume={applied_gain}dB",
+            ] + codec_args + [
                 "-map_metadata", "0",
                 "-metadata", f"track={track_num}",
                 output_path
@@ -246,6 +294,48 @@ class AudioWorker(QRunnable):
         result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
         if result.returncode != 0:
             raise Exception(f"FFmpeg Fehler: {result.stderr}")
+
+    def probe_audio_params(self, ffmpeg_exe):
+        # Ermittelt Quell-Parameter per ffprobe, um Bitrate/Format beizubehalten
+        ffprobe_exe = "ffprobe"
+        try:
+            if ffmpeg_exe and os.path.isabs(ffmpeg_exe):
+                base_dir = os.path.dirname(ffmpeg_exe)
+                cand = os.path.join(base_dir, "ffprobe.exe" if os.name == "nt" else "ffprobe")
+                if os.path.isfile(cand):
+                    ffprobe_exe = cand
+            startupinfo = None
+            if os.name == 'nt':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            cmd = [
+                ffprobe_exe, "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name,channels,sample_rate,bits_per_sample,sample_fmt,bit_rate",
+                "-of", "json",
+                self.file_path
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+            data = json.loads(res.stdout or "{}")
+            streams = data.get("streams") or []
+            if streams:
+                s = streams[0]
+                def to_int(x, default=0):
+                    try:
+                        return int(x)
+                    except Exception:
+                        return default
+                return {
+                    "codec_name": s.get("codec_name"),
+                    "channels": to_int(s.get("channels"), 0),
+                    "sample_rate": to_int(s.get("sample_rate"), 0),
+                    "bits_per_sample": to_int(s.get("bits_per_sample"), 0),
+                    "sample_fmt": (s.get("sample_fmt") or "").lower(),
+                    "bit_rate": to_int(s.get("bit_rate"), 0),
+                }
+        except Exception:
+            pass
+        return None
 
     def get_peak_volume(self, ffmpeg_exe):
         cmd = [
