@@ -187,7 +187,9 @@ class AudioWorker(QRunnable):
         target_dev = params["target_dev"]
         ref_lufs = params["ref_lufs"]
 
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         
         # Ausgabeformat/Codec-Argumente vorbereiten, um Bitrate/Format der Quelle zu erhalten
         ext = os.path.splitext(output_path)[1].lower()
@@ -291,19 +293,25 @@ class AudioWorker(QRunnable):
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-        result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+        result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo,
+                                 encoding='utf-8', errors='replace')
         if result.returncode != 0:
-            raise Exception(f"FFmpeg Fehler: {result.stderr}")
+            stderr_out = result.stderr.strip() if result.stderr else "(kein Output)"
+            raise Exception(f"FFmpeg-Fehler (Exit {result.returncode}):\n{stderr_out[-2000:]}")
 
     def probe_audio_params(self, ffmpeg_exe):
         # Ermittelt Quell-Parameter per ffprobe, um Bitrate/Format beizubehalten
-        ffprobe_exe = "ffprobe"
+        ffprobe_exe = None
+        # 1) Neben ffmpeg.exe suchen
+        if ffmpeg_exe and os.path.isfile(ffmpeg_exe):
+            base_dir = os.path.dirname(ffmpeg_exe)
+            cand = os.path.join(base_dir, "ffprobe.exe" if os.name == "nt" else "ffprobe")
+            if os.path.isfile(cand):
+                ffprobe_exe = cand
+        # 2) Im PATH suchen
+        if not ffprobe_exe:
+            ffprobe_exe = shutil.which("ffprobe") or ("ffprobe.exe" if os.name == "nt" else "ffprobe")
         try:
-            if ffmpeg_exe and os.path.isabs(ffmpeg_exe):
-                base_dir = os.path.dirname(ffmpeg_exe)
-                cand = os.path.join(base_dir, "ffprobe.exe" if os.name == "nt" else "ffprobe")
-                if os.path.isfile(cand):
-                    ffprobe_exe = cand
             startupinfo = None
             if os.name == 'nt':
                 startupinfo = subprocess.STARTUPINFO()
@@ -315,7 +323,11 @@ class AudioWorker(QRunnable):
                 "-of", "json",
                 self.file_path
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
+            res = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo,
+                                 encoding='utf-8', errors='replace')
+            if res.returncode != 0:
+                # ffprobe nicht verfügbar oder Fehler – kein fataler Abbruch, nur Fallback
+                return None
             data = json.loads(res.stdout or "{}")
             streams = data.get("streams") or []
             if streams:
@@ -333,6 +345,9 @@ class AudioWorker(QRunnable):
                     "sample_fmt": (s.get("sample_fmt") or "").lower(),
                     "bit_rate": to_int(s.get("bit_rate"), 0),
                 }
+        except FileNotFoundError:
+            # ffprobe nicht installiert/nicht gefunden – Fallback ohne Codec-Infos
+            return None
         except Exception:
             pass
         return None
@@ -349,14 +364,17 @@ class AudioWorker(QRunnable):
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo, encoding='utf-8')
+            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo,
+                                    encoding='utf-8', errors='replace')
+            if result.returncode != 0:
+                raise Exception(f"volumedetect fehlgeschlagen (Exit {result.returncode}): {result.stderr.strip()[-1000:]}")
             output = result.stderr
             match = re.search(r"max_volume: ([\-\d\.]+) dB", output)
             if match:
                 return float(match.group(1))
+            raise Exception("Peak-Lautstärke konnte nicht aus FFmpeg-Output gelesen werden.")
         except Exception:
-            pass
-        return None
+            raise
 
 class NormalizerApp(QMainWindow):
     def __init__(self):
@@ -545,7 +563,7 @@ class NormalizerApp(QMainWindow):
         saved_path = self.settings.value("ffmpeg_path", "")
         self.edit_ffmpeg.setText(saved_path)
         self.update_ffmpeg_config(saved_path)
-        self.edit_ffmpeg.textChanged.connect(self.save_ffmpeg_path)
+        self.edit_ffmpeg.editingFinished.connect(self.save_ffmpeg_path)
         
         ffmpeg_input_layout.addWidget(self.edit_ffmpeg)
         self.btn_browse_ffmpeg = QPushButton("Durchsuchen")
@@ -756,22 +774,44 @@ class NormalizerApp(QMainWindow):
             self.edit_ref_lufs.show()
             self.hint_ref_lufs.show()
 
-    def update_ffmpeg_config(self, path):
+    def update_ffmpeg_config(self, path, show_warnings=False):
         if not path:
             return
             
         ffmpeg_dir = ""
         path = os.path.normpath(path)
         if os.path.isfile(path):
+            # Prüfen ob die Datei tatsächlich ausführbar / ffmpeg ist
+            if not os.access(path, os.X_OK) and os.name != 'nt':
+                if show_warnings:
+                    QMessageBox.warning(self, "FFmpeg-Pfad",
+                        f"Die Datei '{path}' ist nicht ausführbar.\n"
+                        f"Bitte stelle sicher, dass es sich um ffmpeg handelt.")
+                return
             self.ffmpeg_exe_path = path
             ffmpeg_dir = os.path.dirname(path)
         elif os.path.isdir(path):
+            found = False
             for exe in ["ffmpeg.exe", "ffmpeg"]:
                 potential_exe = os.path.join(path, exe)
                 if os.path.isfile(potential_exe):
                     self.ffmpeg_exe_path = potential_exe
                     ffmpeg_dir = path
+                    found = True
                     break
+            if not found:
+                if show_warnings:
+                    QMessageBox.warning(self, "FFmpeg nicht gefunden",
+                        f"Im Ordner '{path}' wurde keine ffmpeg-Datei gefunden.\n"
+                        f"Bitte wähle den Ordner, der ffmpeg.exe enthält, "
+                        f"oder direkt die ffmpeg.exe-Datei.")
+                return
+        else:
+            if show_warnings:
+                QMessageBox.warning(self, "FFmpeg-Pfad ungültig",
+                    f"Der angegebene Pfad existiert nicht:\n'{path}'\n\n"
+                    f"Bitte gib einen gültigen Pfad zur ffmpeg.exe an.")
+            return
         
         if ffmpeg_dir:
             ffmpeg_dir = os.path.abspath(ffmpeg_dir)
@@ -782,12 +822,17 @@ class NormalizerApp(QMainWindow):
     def save_ffmpeg_path(self):
         path = self.edit_ffmpeg.text().strip()
         self.settings.setValue("ffmpeg_path", path)
-        self.update_ffmpeg_config(path)
+        self.update_ffmpeg_config(path, show_warnings=True)
 
     def browse_ffmpeg(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "ffmpeg.exe auswählen", "", "Executables (ffmpeg.exe);;All Files (*)")
+        if os.name == 'nt':
+            file_filter = "Executables (ffmpeg.exe);;All Files (*)"
+        else:
+            file_filter = "All Files (*)"
+        file_path, _ = QFileDialog.getOpenFileName(self, "ffmpeg auswählen", "", file_filter)
         if file_path:
             self.edit_ffmpeg.setText(file_path)
+            self.save_ffmpeg_path()
 
     def select_files(self):
         menu = QMenu(self)
@@ -821,7 +866,10 @@ class NormalizerApp(QMainWindow):
         for f in files:
             if f not in self.all_files:
                 self.all_files.append(f)
-                self.file_list.addItem(os.path.basename(f))
+                # Zeige Elternordner + Dateiname um Verwechslungen bei gleichnamigen Dateien zu vermeiden
+                parent = os.path.basename(os.path.dirname(f))
+                display = os.path.join(parent, os.path.basename(f)) if parent else os.path.basename(f)
+                self.file_list.addItem(display)
         
         if self.all_files:
             self.btn_normalize.setEnabled(True)
@@ -892,8 +940,19 @@ class NormalizerApp(QMainWindow):
             target_dir = QFileDialog.getExistingDirectory(self, "Zielordner wählen")
             if not target_dir: return
             self.current_target_dir = target_dir
+            # Relative Pfade beibehalten, damit Unterordner-Struktur erhalten bleibt
+            # und Dateinamen-Kollisionen bei gleichen Dateinamen in verschiedenen Unterordnern vermieden werden
+            common_base = os.path.commonpath(self.all_files) if len(self.all_files) > 1 else os.path.dirname(self.all_files[0])
+            if os.path.isfile(common_base):
+                common_base = os.path.dirname(common_base)
             for f in self.all_files:
-                self.current_output_mapping[f] = os.path.join(target_dir, os.path.basename(f))
+                try:
+                    rel = os.path.relpath(f, common_base)
+                except ValueError:
+                    # Verschiedene Laufwerke unter Windows → Fallback auf Dateiname
+                    rel = os.path.basename(f)
+                out_path = os.path.join(target_dir, rel)
+                self.current_output_mapping[f] = out_path
 
         # UI sperren
         self.btn_normalize.setEnabled(False)
@@ -946,7 +1005,8 @@ class NormalizerApp(QMainWindow):
             else:
                 self.current_params["ref_lufs"] = self.current_params["target_lufs"]
         else:
-            self.current_params["ref_lufs"] = self.current_params["ref_lufs_override"] or self.current_params["target_lufs"]
+            override = self.current_params["ref_lufs_override"]
+            self.current_params["ref_lufs"] = override if override is not None else self.current_params["target_lufs"]
 
         self.pending_tasks = len(self.all_files)
         self.progress_bar.setMaximum(self.pending_tasks)
@@ -972,23 +1032,33 @@ class NormalizerApp(QMainWindow):
     def on_normalization_finished(self, result):
         self.success_count += 1
         self.pending_tasks -= 1
-        self.progress_bar.setValue(self.progress_bar.maximum() - self.pending_tasks)
+        remaining = max(self.pending_tasks, 0)
+        self.progress_bar.setValue(self.progress_bar.maximum() - remaining)
         
         if self.pending_tasks == 0:
             self.finish_normalization()
 
     def on_task_error(self, error_msg):
-        print(error_msg)
-        if "ffmpeg" in error_msg.lower():
+        print(f"[Fehler] {error_msg}")
+        error_lower = error_msg.lower()
+        if "ffmpeg" in error_lower or "ffprobe" in error_lower:
             self.ffmpeg_error_occurred = True
         self.error_count += 1
         self.pending_tasks -= 1
-        self.progress_bar.setValue(self.progress_bar.maximum() - self.pending_tasks)
+        remaining = max(self.pending_tasks, 0)
+        self.progress_bar.setValue(self.progress_bar.maximum() - remaining)
+
+        # Einzelne Fehlermeldung direkt anzeigen (max. 3 Dialoge um Spam zu vermeiden)
+        if self.error_count <= 3:
+            short_msg = error_msg if len(error_msg) <= 600 else error_msg[:600] + "\n...(gekürzt)"
+            QMessageBox.warning(self, f"Fehler bei Datei ({self.error_count})", short_msg)
         
         if self.pending_tasks == 0:
             # Falls wir in der Analyse-Phase waren, müssen wir trotzdem weitermachen oder abbrechen
             # Wenn Analyse-Fehler, wird normalization_phase trotzdem aufgerufen wenn pending_tasks == 0
             if self.progress_bar.format().startswith("Analysiere"):
+                # Sicherstellen dass finish_normalization nicht doppelt aufgerufen wird
+                self.pending_tasks = -1  # Sentinel: verhindert erneuten Aufruf
                 self.run_normalization_phase()
             else:
                 self.finish_normalization()
@@ -1008,14 +1078,20 @@ class NormalizerApp(QMainWindow):
         if self.error_count > 0:
             msg += f"\nFehler: {self.error_count}"
             if self.ffmpeg_error_occurred:
-                msg += "\n\nHinweis: Loudness/Hybrid-Normalisierung und FLAC-Dateien benötigen 'ffmpeg'. Bitte stelle sicher, dass der Pfad zur ffmpeg.exe oben korrekt angegeben ist."
+                ffmpeg_path_info = self.ffmpeg_exe_path or "(nicht gesetzt)"
+                msg += ("\n\nFFmpeg-Hinweis: Mindestens ein Fehler stand im Zusammenhang mit FFmpeg/FFprobe.\n"
+                        f"Aktuell konfigurierter Pfad: {ffmpeg_path_info}\n"
+                        "Bitte stelle sicher, dass:\n"
+                        "  • der Pfad zur ffmpeg.exe korrekt angegeben ist,\n"
+                        "  • ffmpeg.exe im selben Ordner wie ffprobe.exe liegt,\n"
+                        "  • die Dateien nicht durch Antivirus blockiert werden.")
         
         QMessageBox.information(self, "Abgeschlossen", msg)
 
     def create_log_file(self):
         try:
             now = QDateTime.currentDateTime()
-            timestamp = now.toString("dd-MM-HH-mm")
+            timestamp = now.toString("yyyy-MM-dd_HH-mm")
             folder_name = self.current_source_folder_name or "Audio-Files"
             log_filename = f"Audio-Normalizer-Log-{timestamp}-{folder_name}.txt"
             log_path = os.path.join(self.current_target_dir, log_filename)
