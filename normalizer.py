@@ -16,10 +16,10 @@ except ImportError:
     except ImportError:
         audioop = None
 
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QLabel, QPushButton, QFileDialog, QListWidget, 
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                             QLabel, QPushButton, QFileDialog, QListWidget,
                              QProgressBar, QMessageBox, QLineEdit, QMenu, QComboBox, QGridLayout, QGroupBox,
-                             QDoubleSpinBox)
+                             QDoubleSpinBox, QCheckBox)
 from PyQt6.QtCore import Qt, QMimeData, pyqtSignal, QSettings, QRunnable, QThreadPool, QObject, QDateTime
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent, QFont, QDoubleValidator, QIcon
 
@@ -179,7 +179,8 @@ class AudioWorker(QRunnable):
         params = self.kwargs.get("params")
         output_path = self.kwargs.get("output_path")
         stats = self.kwargs.get("stats")
-        
+        backup_dir = self.kwargs.get("backup_dir")
+
         mode = params["mode"]
         target_peak = params["target_peak"]
         target_lufs = params["target_lufs"]
@@ -187,9 +188,23 @@ class AudioWorker(QRunnable):
         target_dev = params["target_dev"]
         ref_lufs = params["ref_lufs"]
 
-        out_dir = os.path.dirname(output_path)
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
+        # Bei Überschreiben-Modus: Backup erstellen, dann in temp-Datei schreiben und Original ersetzen
+        actual_output = output_path
+        temp_path = None
+        if backup_dir:
+            # Backup der Originaldatei anlegen (Ordnerstruktur relativ beibehalten)
+            backup_path = os.path.join(backup_dir, os.path.basename(self.file_path))
+            os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+            shutil.copy2(self.file_path, backup_path)
+            # In temp-Datei schreiben, danach Original ersetzen
+            fd, temp_path = tempfile.mkstemp(suffix=os.path.splitext(output_path)[1],
+                                             dir=os.path.dirname(output_path))
+            os.close(fd)
+            actual_output = temp_path
+        else:
+            out_dir = os.path.dirname(output_path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
         
         # Ausgabeformat/Codec-Argumente vorbereiten, um Bitrate/Format der Quelle zu erhalten
         ext = os.path.splitext(output_path)[1].lower()
@@ -201,41 +216,43 @@ class AudioWorker(QRunnable):
             bps = ainfo.get("bits_per_sample") or 0
             sfmt = (ainfo.get("sample_fmt") or "").lower()
             if ext == ".wav":
-                # Passendes PCM-Format gemäß Quelle wählen
+                # Rekordbox-kompatibles PCM-Format wählen (nur 16-bit oder 24-bit Integer)
                 pcm_codec = None
-                if bps >= 32:
-                    pcm_codec = "pcm_f32le" if "flt" in sfmt else "pcm_s32le"
-                elif bps >= 24:
+                if bps >= 24:
                     pcm_codec = "pcm_s24le"
                 elif bps >= 16:
                     pcm_codec = "pcm_s16le"
-                elif bps > 0:
-                    pcm_codec = "pcm_u8"
                 else:
-                    # Fallback auf sample_fmt, falls bits_per_sample fehlt
-                    if "s16" in sfmt:
+                    # Fallback auf sample_fmt
+                    if "s32" in sfmt or "flt" in sfmt or "s24" in sfmt:
+                        pcm_codec = "pcm_s24le"
+                    else:
                         pcm_codec = "pcm_s16le"
-                    elif "s32" in sfmt:
-                        pcm_codec = "pcm_s32le"
-                    elif "flt" in sfmt:
-                        pcm_codec = "pcm_f32le"
-                if pcm_codec:
-                    codec_args += ["-c:a", pcm_codec]
+                codec_args += ["-c:a", pcm_codec]
                 if sr:
-                    codec_args += ["-ar", str(sr)]
+                    # Rekordbox unterstützt max 96kHz
+                    codec_args += ["-ar", str(min(sr, 96000))]
                 if ch:
                     codec_args += ["-ac", str(ch)]
+                # Standard RIFF WAV erzwingen (kein RF64) für Rekordbox-Kompatibilität
+                codec_args += ["-rf64", "never"]
             elif ext == ".flac":
-                # FLAC beibehalten, SR/Kanäle übernehmen und Bit-Tiefe annähern
+                # FLAC beibehalten, Rekordbox-kompatibel (max 24-bit, max 96kHz)
                 codec_args += ["-c:a", "flac"]
                 if sr:
-                    codec_args += ["-ar", str(sr)]
+                    codec_args += ["-ar", str(min(sr, 96000))]
                 if ch:
                     codec_args += ["-ac", str(ch)]
                 if bps >= 24:
                     codec_args += ["-sample_fmt", "s32"]  # entspricht 24-bit FLAC-Output
-                elif bps > 0:
+                else:
                     codec_args += ["-sample_fmt", "s16"]
+        else:
+            # Ohne Probe-Daten: sichere Rekordbox-kompatible Defaults
+            if ext == ".wav":
+                codec_args += ["-c:a", "pcm_s24le", "-rf64", "never"]
+            elif ext == ".flac":
+                codec_args += ["-c:a", "flac", "-sample_fmt", "s32"]
 
         actual_mode = ""
         if mode == "Hybrid-Normalizing":
@@ -251,6 +268,11 @@ class AudioWorker(QRunnable):
 
         track_num = "0" if actual_mode == "Peak" else "1"
 
+        # WAV: keine Quell-Metadaten kopieren (verhindert unbekannte Chunks für Rekordbox)
+        # FLAC: Metadaten beibehalten (Vorbis-Comments sind unproblematisch)
+        metadata_args = ["-map_metadata", "-1"] if ext == ".wav" else ["-map_metadata", "0"]
+        metadata_args += ["-metadata", f"track={track_num}"]
+
         if actual_mode == "Peak":
             # Peak messen (muss hier passieren da Multithreaded)
             max_vol = self.get_peak_volume(ffmpeg_exe)
@@ -259,33 +281,31 @@ class AudioWorker(QRunnable):
                 cmd = [
                     ffmpeg_exe, "-y", "-i", self.file_path,
                     "-af", f"volume={gain}dB",
-                ] + codec_args + [
-                    "-map_metadata", "0",
-                    "-metadata", f"track={track_num}",
-                    output_path
+                ] + codec_args + metadata_args + [
+                    actual_output
                 ]
             else:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
                 raise Exception("Konnte Peak-Lautstärke nicht ermitteln.")
         else:
             # Loudness-Normalisierung
             if not stats:
                 # Falls keine Stats da sind (z.B. im reinen Loudness Modus), messen wir sie jetzt
                 stats = self.analyze()
-            
+
             actual_target_lufs = ref_lufs if mode == "Hybrid-Normalizing" else target_lufs
             tp_limit = min(target_tp, target_peak) if mode == "Hybrid-Normalizing" else target_tp
-            
+
             gain = actual_target_lufs - stats["lufs"]
             max_allowed_gain = tp_limit - stats["tp"]
             applied_gain = min(gain, max_allowed_gain)
-            
+
             cmd = [
                 ffmpeg_exe, "-y", "-i", self.file_path,
                 "-af", f"volume={applied_gain}dB",
-            ] + codec_args + [
-                "-map_metadata", "0",
-                "-metadata", f"track={track_num}",
-                output_path
+            ] + codec_args + metadata_args + [
+                actual_output
             ]
 
         startupinfo = None
@@ -293,11 +313,20 @@ class AudioWorker(QRunnable):
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-        result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo,
-                                 encoding='utf-8', errors='replace')
-        if result.returncode != 0:
-            stderr_out = result.stderr.strip() if result.stderr else "(kein Output)"
-            raise Exception(f"FFmpeg-Fehler (Exit {result.returncode}):\n{stderr_out[-2000:]}")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo,
+                                     encoding='utf-8', errors='replace')
+            if result.returncode != 0:
+                stderr_out = result.stderr.strip() if result.stderr else "(kein Output)"
+                raise Exception(f"FFmpeg-Fehler (Exit {result.returncode}):\n{stderr_out[-2000:]}")
+
+            # Bei Überschreiben-Modus: temp-Datei über Original verschieben
+            if backup_dir and temp_path:
+                shutil.move(temp_path, output_path)
+        except Exception:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
 
     def probe_audio_params(self, ffmpeg_exe):
         # Ermittelt Quell-Parameter per ffprobe, um Bitrate/Format beizubehalten
@@ -647,6 +676,19 @@ class NormalizerApp(QMainWindow):
         self.hint_ref_lufs.setStyleSheet(hint_style)
 
         settings_layout.addWidget(self.params_widget)
+
+        # Checkbox: Dateien überschreiben (für Rekordbox CuePoints)
+        self.chk_overwrite = QCheckBox("Originaldateien überschreiben (CuePoints in Rekordbox erhalten)")
+        self.chk_overwrite.setToolTip(
+            "Wenn aktiviert, werden die Originaldateien direkt überschrieben.\n"
+            "Dadurch bleiben CuePoints, Loops und Beatgrids in Rekordbox erhalten,\n"
+            "da Rekordbox Tracks anhand ihres Dateipfads identifiziert.\n\n"
+            "Achtung: Die Originaldateien werden unwiderruflich verändert!"
+        )
+        self.chk_overwrite.setChecked(self.settings.value("overwrite_original", "false") == "true")
+        self.chk_overwrite.stateChanged.connect(self.save_overwrite_setting)
+        settings_layout.addWidget(self.chk_overwrite)
+
         layout.addWidget(settings_group)
 
         self.toggle_settings_visibility()
@@ -819,6 +861,9 @@ class NormalizerApp(QMainWindow):
             if ffmpeg_dir not in paths:
                 os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 
+    def save_overwrite_setting(self):
+        self.settings.setValue("overwrite_original", "true" if self.chk_overwrite.isChecked() else "false")
+
     def save_ffmpeg_path(self):
         path = self.edit_ffmpeg.text().strip()
         self.settings.setValue("ffmpeg_path", path)
@@ -929,7 +974,19 @@ class NormalizerApp(QMainWindow):
                     return
 
         self.current_output_mapping = {}
-        if len(self.all_files) == 1:
+        self.overwrite_original = self.chk_overwrite.isChecked()
+        self.backup_dir = None
+
+        if self.overwrite_original:
+            # Überschreiben-Modus: Backup-Ordner wählen
+            backup_dir = QFileDialog.getExistingDirectory(self, "Backup-Ordner für Originaldateien wählen")
+            if not backup_dir:
+                return
+            self.backup_dir = backup_dir
+            for f in self.all_files:
+                self.current_output_mapping[f] = f
+            self.current_target_dir = os.path.dirname(self.all_files[0])
+        elif len(self.all_files) == 1:
             source_path = self.all_files[0]
             ext = os.path.splitext(source_path)[1]
             target_path, _ = QFileDialog.getSaveFileName(self, "Speichern unter", source_path, f"Audio Files (*{ext})")
@@ -1017,11 +1074,12 @@ class NormalizerApp(QMainWindow):
 
         for file_path in self.all_files:
             try:
-                worker = AudioWorker("normalize", file_path, 
+                worker = AudioWorker("normalize", file_path,
                                     ffmpeg_exe=ffmpeg_exe,
                                     params=self.current_params,
                                     output_path=self.current_output_mapping[file_path],
-                                    stats=self.analysis_results.get(file_path))
+                                    stats=self.analysis_results.get(file_path),
+                                    backup_dir=self.backup_dir)
                 
                 worker.signals.finished.connect(self.on_normalization_finished)
                 worker.signals.error.connect(self.on_task_error)
