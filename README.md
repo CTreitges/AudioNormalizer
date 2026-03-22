@@ -5,9 +5,13 @@ Ein professionelles Werkzeug zur Normalisierung von Audio-Dateien (WAV, FLAC), d
 ## Hauptfunktionen
 - **Drei Normalisierungs-Modi**: Peak, Loudness (EBU R128) und ein intelligenter Hybrid-Modus.
 - **Erhalt der Dynamik**: Im Gegensatz zu vielen anderen Tools verwendet dieser Normalizer lineare Verstärkung statt Kompression. Der Klangcharakter bleibt unverändert.
-- **Metadaten-Schutz**: Alle Tags wie Titel, Interpret, Album und sogar Album-Cover bleiben vollständig erhalten. 
+- **Rekordbox-Kompatibilität**: Ausgabedateien werden in rekordbox-kompatiblen Formaten erzeugt (PCM 16/24-bit, max. 96 kHz, Standard-RIFF-WAV). Bei WAV-Dateien werden problematische Metadaten-Chunks entfernt.
+- **Originaldateien überschreiben**: Optionaler Modus zum direkten Überschreiben der Quelldateien mit automatischem Backup. Ideal, um CuePoints, Loops und Beatgrids in Rekordbox zu erhalten.
+- **Metadaten-Schutz**: Bei FLAC-Dateien bleiben alle Tags wie Titel, Interpret, Album und Cover vollständig erhalten.
+- **Ordnerstruktur beibehalten**: Bei der Stapelverarbeitung wird die relative Ordnerstruktur im Zielverzeichnis beibehalten – keine Namenskollisionen bei gleichnamigen Dateien in verschiedenen Unterordnern.
 - **Multithreading**: Die Anwendung nutzt alle verfügbaren Prozessorkerne, um mehrere Dateien gleichzeitig zu analysieren und zu verarbeiten – ideal für große Musiksammlungen.
 - **Automatisches Logging**: Bei der Stapelverarbeitung wird ein detaillierter Bericht über alle Einstellungen und Ergebnisse erstellt.
+- **Verbesserte Fehlerbehandlung**: Detaillierte Fehlermeldungen bei FFmpeg/FFprobe-Problemen mit konkreten Lösungshinweisen.
 - **Normalisierungs-Indikator**: Das Programm hinterlegt im Metadaten-Feld "Titelnummer", welches Verfahren angewandt wurde (0 = Peak, 1 = Loudness).
 
 ---
@@ -46,20 +50,23 @@ Dieser Modus wurde speziell für Playlists und Alben entwickelt (erfordert minde
 
 ## Bedienungsanleitung
 
-1. **FFmpeg Pfad**: Für fast alle Funktionen ist `ffmpeg` erforderlich. Geben Sie den Pfad zur `ffmpeg.exe` im oberen Feld an oder nutzen Sie den "Durchsuchen" Button. Der Pfad wird für den nächsten Start gespeichert.
-2. **Dateien hinzufügen**: Ziehen Sie Audio-Dateien (WAV/FLAC) oder ganze Ordner in das Drag & Drop Feld oder klicken Sie darauf.
+1. **FFmpeg Pfad**: Für fast alle Funktionen ist `ffmpeg` erforderlich. Geben Sie den Pfad zur `ffmpeg.exe` im oberen Feld an oder nutzen Sie den "Durchsuchen" Button. Der Pfad wird für den nächsten Start gespeichert. `ffprobe.exe` sollte im selben Verzeichnis liegen.
+2. **Dateien hinzufügen**: Ziehen Sie Audio-Dateien (WAV/FLAC) oder ganze Ordner in das Drag & Drop Feld oder klicken Sie darauf. In der Dateiliste wird zur besseren Unterscheidung der Elternordner mit angezeigt.
 3. **Modus & Werte wählen**: Wählen Sie das gewünschte Verfahren. Die Standardwerte sind für hochwertige Ergebnisse optimiert.
-4. **Normalisierung starten**: Klicken Sie auf "Normalisieren".
+4. **Überschreiben-Option**: Aktivieren Sie optional "Originaldateien überschreiben", um die Quelldateien direkt zu ersetzen. So bleiben CuePoints und Beatgrids in Rekordbox erhalten. Es wird immer ein Backup-Ordner abgefragt.
+5. **Normalisierung starten**: Klicken Sie auf "Normalisieren".
    - Bei einer Einzeldatei wählen Sie den neuen Dateinamen.
    - Bei mehreren Dateien wählen Sie einen Zielordner aus.
-5. **Abschluss**: Nach der Bearbeitung erhalten Sie eine Zusammenfassung. Bei Ordner-Verarbeitung finden Sie ein Protokoll im Zielordner.
+   - Im Überschreiben-Modus wählen Sie nur den Backup-Ordner.
+6. **Abschluss**: Nach der Bearbeitung erhalten Sie eine Zusammenfassung. Bei Ordner-Verarbeitung finden Sie ein Protokoll im Zielordner.
 
 ---
 
 ## Technische Hinweise & Voraussetzungen
 
-- **FFmpeg**: Die `ffmpeg.exe` ist zwingend erforderlich (außer für Peak-Normalisierung bei reinen WAV-Dateien). Falls nicht vorhanden, kann sie kostenlos von der offiziellen FFmpeg-Website heruntergeladen werden.
-- **Metadaten**: Das Feld "Titelnummer" (Track) wird als technischer Indikator verwendet (0=Peak, 1=Loudness). Falls Ihre Dateien bereits Titelnummern haben, werden diese überschrieben.
+- **FFmpeg & FFprobe**: `ffmpeg.exe` und `ffprobe.exe` sind zwingend erforderlich und sollten im selben Verzeichnis liegen. `ffprobe` wird zur Erkennung der Quell-Codec-Parameter verwendet. Falls nicht vorhanden, können sie kostenlos von der offiziellen FFmpeg-Website heruntergeladen werden.
+- **Metadaten**: Das Feld "Titelnummer" (Track) wird als technischer Indikator verwendet (0=Peak, 1=Loudness). Falls Ihre Dateien bereits Titelnummern haben, werden diese überschrieben. Bei WAV-Dateien werden Quell-Metadaten entfernt, um maximale Kompatibilität mit Rekordbox zu gewährleisten.
+- **Rekordbox**: Ausgabedateien werden auf Rekordbox-Kompatibilität optimiert: max. 24-bit Integer, max. 96 kHz Samplerate, Standard-RIFF-WAV (kein RF64).
 - **System**: Die Anwendung ist für Windows optimiert und läuft als eigenständige EXE-Datei ohne weitere Installationen.
 
 ---
