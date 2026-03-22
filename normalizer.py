@@ -550,6 +550,10 @@ class NormalizerApp(QMainWindow):
                 selection-background-color: #e1f0ff;
                 selection-color: #0078d4;
             }
+            QCheckBox {
+                color: #333;
+                font-weight: normal;
+            }
             QGroupBox {
                 font-weight: bold;
                 border: 1px solid #bbb;
@@ -650,7 +654,7 @@ class NormalizerApp(QMainWindow):
         self.edit_dev = CustomDoubleSpinBox()
         self.edit_dev.setRange(0.0, 20.0)
         self.edit_dev.setDecimals(2)
-        self.edit_dev.setValue(3.0)
+        self.edit_dev.setValue(1.0)
         self.edit_dev.setFixedWidth(100)
 
         self.lbl_ref_lufs = QLabel("Referenz LUFS (Optional):")
@@ -670,7 +674,7 @@ class NormalizerApp(QMainWindow):
         self.hint_lufs.setStyleSheet(hint_style)
         self.hint_tp = QLabel("(-3,0)")
         self.hint_tp.setStyleSheet(hint_style)
-        self.hint_dev = QLabel("(3,0)")
+        self.hint_dev = QLabel("(1,0)")
         self.hint_dev.setStyleSheet(hint_style)
         self.hint_ref_lufs = QLabel("(Auto)")
         self.hint_ref_lufs.setStyleSheet(hint_style)
