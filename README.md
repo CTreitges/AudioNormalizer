@@ -43,7 +43,7 @@ Dieser Modus wurde speziell für Playlists und Alben entwickelt (erfordert minde
 - **Ziel Peak (dB)**: Maximaler Pegel für die Peak-Normalisierung (Standard: -3,0 dB).
 - **Ziel Loudness (LUFS)**: Die gewünschte Ziel-Lautheit (Standard: -11,0 LUFS).
 - **Max True Peak (dB)**: Das absolute Sicherheitslimit gegen Clipping (Standard: -3,0 dB).
-- **Max. Abweichung (dB)**: Der Toleranzbereich im Hybrid-Modus. Bestimmt, ab welcher Abweichung vom Durchschnitt die Loudness-Korrektur greift (Standard: 3,0 dB).
+- **Max. Abweichung (dB)**: Der Toleranzbereich im Hybrid-Modus. Bestimmt, ab welcher Abweichung vom Durchschnitt die Loudness-Korrektur greift (Standard: 1,0 dB).
 - **Referenz LUFS (Optional)**: Ermöglicht es, einen festen Wert als Basis für den Hybrid-Modus vorzugeben (z.B. um mehrere Alben auf exakt denselben Level zu bringen). "Auto" berechnet den Wert dynamisch aus der aktuellen Liste.
 
 ---
