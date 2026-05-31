@@ -1,12 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
+# Gebündelte FFmpeg-Binary (imageio-ffmpeg) + Icon mitnehmen.
+datas = [('icon.ico', '.')]
+datas += collect_data_files('imageio_ffmpeg')
+
+# Alle Submodule des eigenen Pakets sicher einsammeln (GUI wird dynamisch geladen).
+hiddenimports = collect_submodules('audionormalizer')
 
 a = Analysis(
     ['normalizer.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.')],
-    hiddenimports=['audioop_lts'],
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
