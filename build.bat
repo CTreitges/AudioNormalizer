@@ -112,7 +112,7 @@ if not exist "!VENV_PYTHON!" (
 echo.
 echo [3/4] Installiere/Aktualisiere Abhaengigkeiten...
 "!VENV_PYTHON!" -m pip install --upgrade pip >nul 2>&1
-"!VENV_PYTHON!" -m pip install -r requirements.txt
+"!VENV_PYTHON!" -m pip install -r requirements.txt pyinstaller
 if !errorlevel! neq 0 (
     echo.
     echo [FEHLER] Installation der Requirements fehlgeschlagen.
@@ -121,13 +121,10 @@ if !errorlevel! neq 0 (
     exit /b 1
 )
 
-:: 4. Build ausfuehren
+:: 4. Build ausfuehren (Spec buendelt FFmpeg via imageio-ffmpeg + Icon)
 echo.
 echo [4/4] Erstelle EXE-Datei...
-set "ICON_PARAM="
-if exist "icon.ico" set "ICON_PARAM=--icon=icon.ico --add-data icon.ico;."
-
-"!VENV_PYTHON!" -m PyInstaller --onefile --windowed --name "AudioNormalizer" --hidden-import=audioop_lts !ICON_PARAM! normalizer.py
+"!VENV_PYTHON!" -m PyInstaller --noconfirm AudioNormalizer.spec
 
 if !errorlevel! == 0 (
     echo.
