@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from typing import Optional
 
 from .ffmpeg_locator import FFmpegTools
 from .models import Measurement
-from .procutil import run
+from .procutil import run_cancellable
 
 _RE_JSON = re.compile(r"\{[^{}]*\}", re.DOTALL)
 _RE_MAXVOL = re.compile(r"max_volume:\s*([\-\d.]+)\s*dB")
@@ -55,30 +56,36 @@ def parse_volumedetect(stderr: str) -> float:
     return float(match.group(1))
 
 
-def measure_loudness(file_path: str, tools: FFmpegTools) -> Measurement:
-    """Misst integrierte LUFS + True Peak (ein voller Decode-Pass)."""
-    res = run([
+def measure_loudness(
+    file_path: str, tools: FFmpegTools,
+    cancel: Optional[threading.Event] = None,
+) -> Measurement:
+    """Misst integrierte LUFS + True Peak (ein voller Decode-Pass, abbrechbar)."""
+    rc, _out, err = run_cancellable([
         tools.ffmpeg, "-hide_banner", "-nostats", "-i", file_path,
         "-af", "loudnorm=print_format=json",
         "-vn", "-sn", "-dn", "-f", "null", "-",
-    ])
-    if res.returncode != 0:
+    ], cancel)
+    if rc != 0:
         raise RuntimeError(
-            f"FFmpeg-Lautheitsmessung fehlgeschlagen (Exit {res.returncode}): "
-            f"{(res.stderr or '').strip()[-800:]}"
+            f"FFmpeg-Lautheitsmessung fehlgeschlagen (Exit {rc}): "
+            f"{(err or '').strip()[-800:]}"
         )
-    return parse_loudnorm_json(res.stderr or "")
+    return parse_loudnorm_json(err or "")
 
 
-def measure_sample_peak(file_path: str, tools: FFmpegTools) -> float:
-    """Misst den Sample-Peak via volumedetect (ein voller Decode-Pass)."""
-    res = run([
+def measure_sample_peak(
+    file_path: str, tools: FFmpegTools,
+    cancel: Optional[threading.Event] = None,
+) -> float:
+    """Misst den Sample-Peak via volumedetect (ein voller Decode-Pass, abbrechbar)."""
+    rc, _out, err = run_cancellable([
         tools.ffmpeg, "-hide_banner", "-nostats", "-i", file_path,
         "-af", "volumedetect", "-vn", "-sn", "-dn", "-f", "null", "-",
-    ])
-    if res.returncode != 0:
+    ], cancel)
+    if rc != 0:
         raise RuntimeError(
-            f"FFmpeg-Peakmessung fehlgeschlagen (Exit {res.returncode}): "
-            f"{(res.stderr or '').strip()[-800:]}"
+            f"FFmpeg-Peakmessung fehlgeschlagen (Exit {rc}): "
+            f"{(err or '').strip()[-800:]}"
         )
-    return parse_volumedetect(res.stderr or "")
+    return parse_volumedetect(err or "")

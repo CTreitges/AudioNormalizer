@@ -47,7 +47,7 @@ REF_LUFS_AUTO_SENTINEL = -100.01
 DEFAULT_TARGET_PEAK = -3.0
 DEFAULT_TARGET_LUFS = -11.0
 DEFAULT_TARGET_TP = -3.0
-DEFAULT_TARGET_DEV = 3.0
+DEFAULT_TARGET_DEV = 1.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +87,8 @@ class NormalizeParams:
     ref_lufs: Optional[float] = None
     # Dither beim Reduzieren der Bittiefe (verlustfreie Formate).
     dither: bool = True
+    # Rekordbox-kompatible WAV/FLAC-Ausgabe (max 24-bit/96 kHz, RIFF, WAV ohne Metadaten).
+    rekordbox: bool = True
     # Maximale Anzahl parallel laufender FFmpeg-Prozesse (None => auto).
     max_workers: Optional[int] = None
 

@@ -33,8 +33,16 @@ def _build_parser() -> argparse.ArgumentParser:
                     "(Peak / Loudness / Hybrid) über FFmpeg.",
     )
     p.add_argument("inputs", nargs="+", help="Dateien und/oder Ordner")
-    p.add_argument("-o", "--output", required=True,
-                   help="Zielordner (mehrere Dateien) oder Zieldatei (Einzeldatei)")
+    p.add_argument("-o", "--output",
+                   help="Zielordner (mehrere Dateien) oder Zieldatei (Einzeldatei). "
+                        "Entfällt im --overwrite-Modus.")
+    p.add_argument("--overwrite", action="store_true",
+                   help="Originaldateien überschreiben (erhält Rekordbox-CuePoints). "
+                        "Erfordert --backup-dir.")
+    p.add_argument("--backup-dir", default=None,
+                   help="Backup-Ordner für die Originale (Pflicht bei --overwrite)")
+    p.add_argument("--no-rekordbox", action="store_true",
+                   help="Rekordbox-Kompatibilität (WAV/FLAC-Limits) deaktivieren")
     p.add_argument("--mode", choices=list(_MODE_ALIASES), default="peak",
                    help="Normalisierungs-Modus (Standard: peak)")
     p.add_argument("--target-peak", type=float, default=DEFAULT_TARGET_PEAK,
@@ -128,22 +136,41 @@ def run(argv: Optional[List[str]] = None) -> int:
         target_dev=args.max_dev,
         ref_lufs_override=args.ref_lufs,
         dither=not args.no_dither,
+        rekordbox=not args.no_rekordbox,
         max_workers=args.workers,
     )
 
-    mapping = _plan_mapping(files, args.output, args.suffix, args.out_format)
-    for src in _warn_overwrite(mapping):
-        print(f"HINWEIS: Ziel überschreibt Quelle: {src}")
+    backup_mapping = None
+    if args.overwrite:
+        if not args.backup_dir:
+            print("FEHLER: --overwrite erfordert --backup-dir.", file=sys.stderr)
+            return 1
+        mapping = {f: f for f in files}
+        backup_mapping = _batch.build_output_mapping(files, args.backup_dir)
+    else:
+        if not args.output:
+            print("FEHLER: -o/--output ist erforderlich (außer mit --overwrite).",
+                  file=sys.stderr)
+            return 1
+        mapping = _plan_mapping(files, args.output, args.suffix, args.out_format)
+        for src in _warn_overwrite(mapping):
+            print(f"HINWEIS: Ziel überschreibt Quelle: {src}")
 
-    print(f"{len(files)} Datei(en), Modus: {mode.label}")
+    print(f"{len(files)} Datei(en), Modus: {mode.label}"
+          + (" [Überschreiben]" if args.overwrite else ""))
 
     if args.dry_run:
         return _dry_run(files, params, tools)
 
-    # Zielordner anlegen.
+    # Ziel- und Backup-Ordner anlegen.
     out_dirs = {os.path.dirname(p) for p in mapping.values() if os.path.dirname(p)}
     for d in out_dirs:
         os.makedirs(d, exist_ok=True)
+    if backup_mapping:
+        for p in backup_mapping.values():
+            bd = os.path.dirname(p)
+            if bd:
+                os.makedirs(bd, exist_ok=True)
 
     callbacks = _batch.BatchCallbacks(
         on_phase=lambda name, total: print(f"\n[{name}] {total} Datei(en)"),
@@ -155,7 +182,8 @@ def run(argv: Optional[List[str]] = None) -> int:
         on_error=lambda msg: print(f"  FEHLER: {msg}", file=sys.stderr),
     )
 
-    result = _batch.run_batch(files, mapping, params, tools, callbacks)
+    result = _batch.run_batch(files, mapping, params, tools, callbacks,
+                              backup_mapping=backup_mapping)
 
     print(f"\nFertig. Erfolgreich: {result.success_count}, "
           f"Fehler: {result.error_count}"

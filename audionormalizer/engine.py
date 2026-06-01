@@ -13,20 +13,16 @@ Clipping-Schutz, indem der Gain gedeckelt wird (nicht durch einen Limiter).
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 import uuid
-from subprocess import TimeoutExpired
 from typing import List, Optional
 
 from .ffmpeg_locator import FFmpegTools
 from .models import AudioInfo, FileResult, Measurement, Mode, NormalizeParams
 from .probe import probe
-from .procutil import popen
+from .procutil import CancelledError, run_cancellable
 from . import measure as _measure
-
-
-class CancelledError(Exception):
-    """Wird ausgelöst, wenn ein Lauf über das Cancel-Event abgebrochen wird."""
 
 
 # --------------------------------------------------------------------------- #
@@ -105,8 +101,21 @@ def build_map_args(output_ext: str) -> List[str]:
 # --------------------------------------------------------------------------- #
 # Codec-/Format-Argumente (formattreue Ausgabe)
 # --------------------------------------------------------------------------- #
-def _pcm_codec(bits: int, sample_fmt: str) -> Optional[str]:
+# Rekordbox-Limits: max. 24-bit Integer, max. 96 kHz Samplerate.
+_REKORDBOX_MAX_SR = 96000
+
+
+def _pcm_codec(bits: int, sample_fmt: str, rekordbox: bool) -> Optional[str]:
     sfmt = (sample_fmt or "").lower()
+    if rekordbox:
+        # Rekordbox akzeptiert nur 16-/24-bit Integer-PCM (kein f32/u8/s32).
+        if bits >= 24:
+            return "pcm_s24le"
+        if bits >= 16:
+            return "pcm_s16le"
+        if "s32" in sfmt or "flt" in sfmt or "s24" in sfmt:
+            return "pcm_s24le"
+        return "pcm_s16le"
     if bits >= 32:
         return "pcm_f32le" if "flt" in sfmt else "pcm_s32le"
     if bits >= 24:
@@ -124,43 +133,50 @@ def _pcm_codec(bits: int, sample_fmt: str) -> Optional[str]:
     return None
 
 
-def build_codec_args(output_ext: str, info: Optional[AudioInfo], dither: bool) -> List[str]:
+def build_codec_args(output_ext: str, info: Optional[AudioInfo], dither: bool,
+                     rekordbox: bool = True) -> List[str]:
     """Baut die FFmpeg-Codec-Argumente passend zum Ziel-Container.
 
     Verlustfreie Ziele (wav/flac) übernehmen SR/Kanäle/Bittiefe der Quelle.
     Verlustbehaftete Ziele übernehmen die Quell-Bitrate, sonst sinnvolle
     Defaults.
+
+    Mit ``rekordbox=True`` (Default) werden WAV/FLAC Rekordbox-kompatibel
+    erzeugt: max. 24-bit Integer, max. 96 kHz, Standard-RIFF-WAV (kein RF64).
     """
     ext = output_ext.lower()
     args: List[str] = []
     info = info or AudioInfo()
-    sr = info.sample_rate or 0
     ch = info.channels or 0
     bps = info.bits_per_sample or 0
     sfmt = info.sample_fmt or ""
     src_br = info.bit_rate or 0
+    sr = info.sample_rate or 0
+    out_sr = min(sr, _REKORDBOX_MAX_SR) if (rekordbox and sr) else sr
 
     def _common_rate_chan():
         out = []
-        if sr:
-            out += ["-ar", str(sr)]
+        if out_sr:
+            out += ["-ar", str(out_sr)]
         if ch:
             out += ["-ac", str(ch)]
         return out
 
     if ext == ".wav":
-        codec = _pcm_codec(bps, sfmt)
-        if codec:
-            args += ["-c:a", codec]
+        codec = _pcm_codec(bps, sfmt, rekordbox) or "pcm_s24le"
+        args += ["-c:a", codec]
         args += _common_rate_chan()
-        if dither and bps and bps <= 16:
+        if dither and codec == "pcm_s16le":
             args += ["-dither_method", "triangular_hp"]
+        if rekordbox:
+            # Standard-RIFF-WAV erzwingen (kein RF64) für Rekordbox.
+            args += ["-rf64", "never"]
     elif ext == ".flac":
         args += ["-c:a", "flac"]
         args += _common_rate_chan()
-        if bps >= 24:
+        if bps >= 24 or (bps == 0 and ("s32" in sfmt or "s24" in sfmt or "flt" in sfmt)):
             args += ["-sample_fmt", "s32"]   # 24-bit-FLAC-Output
-        elif bps > 0:
+        else:
             args += ["-sample_fmt", "s16"]
             if dither:
                 args += ["-dither_method", "triangular_hp"]
@@ -186,29 +202,28 @@ def build_codec_args(output_ext: str, info: Optional[AudioInfo], dither: bool) -
     return args
 
 
+def build_metadata_args(output_ext: str, track_num: str, rekordbox: bool = True) -> List[str]:
+    """Metadaten-Argumente. Bei WAV im Rekordbox-Modus werden Quell-Metadaten
+    komplett entfernt (``-map_metadata -1``), um problematische RIFF-Chunks zu
+    vermeiden; ansonsten bleiben Tags + Cover erhalten (``-map_metadata 0``).
+    Der Track-Indikator (0=Peak, 1=Loudness) wird immer gesetzt.
+    """
+    if output_ext.lower() == ".wav" and rekordbox:
+        base = ["-map_metadata", "-1"]
+    else:
+        base = ["-map_metadata", "0"]
+    return base + ["-metadata", f"track={track_num}"]
+
+
 # --------------------------------------------------------------------------- #
 # Datei-Verarbeitung (I/O, atomar, abbrechbar)
 # --------------------------------------------------------------------------- #
 def _run_ffmpeg(cmd: List[str], cancel: Optional[threading.Event]) -> str:
     """Führt FFmpeg aus, abbrechbar via ``cancel``-Event. Gibt stderr zurück."""
-    proc = popen(cmd)
-    stderr = ""
-    while True:
-        try:
-            _out, err = proc.communicate(timeout=0.25)
-            stderr = err or ""
-            break
-        except TimeoutExpired:
-            if cancel is not None and cancel.is_set():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except TimeoutExpired:
-                    proc.kill()
-                raise CancelledError()
-    if proc.returncode != 0:
+    rc, _out, stderr = run_cancellable(cmd, cancel)
+    if rc != 0:
         raise RuntimeError(
-            f"FFmpeg-Fehler (Exit {proc.returncode}):\n{stderr.strip()[-2000:]}"
+            f"FFmpeg-Fehler (Exit {rc}):\n{(stderr or '').strip()[-2000:]}"
         )
     return stderr
 
@@ -220,9 +235,25 @@ def normalize_file(
     tools: FFmpegTools,
     measurement: Optional[Measurement] = None,
     cancel: Optional[threading.Event] = None,
+    backup_path: Optional[str] = None,
 ) -> FileResult:
-    """Normalisiert eine Datei und schreibt das Ergebnis atomar nach ``output_path``."""
+    """Normalisiert eine Datei und schreibt das Ergebnis atomar nach ``output_path``.
+
+    Ist ``backup_path`` gesetzt (Überschreiben-Modus), wird die Originaldatei
+    vor der Verarbeitung dorthin kopiert. Da ``output_path`` dann == ``file_path``
+    ist, schützt das atomare Temp+Replace die Originaldatei während des Laufs.
+    """
     result = FileResult(input_path=file_path, output_path=output_path)
+
+    if cancel is not None and cancel.is_set():
+        raise CancelledError()
+
+    # Backup VOR jeglicher Verarbeitung anlegen.
+    if backup_path:
+        bdir = os.path.dirname(backup_path)
+        if bdir:
+            os.makedirs(bdir, exist_ok=True)
+        shutil.copy2(file_path, backup_path)
 
     out_dir = os.path.dirname(output_path)
     if out_dir:
@@ -230,20 +261,20 @@ def normalize_file(
 
     info = probe(file_path, tools)
     ext = os.path.splitext(output_path)[1].lower()
-    codec_args = build_codec_args(ext, info, params.dither)
+    codec_args = build_codec_args(ext, info, params.dither, params.rekordbox)
 
     actual_mode = decide_actual_mode(params, measurement.lufs if measurement else None)
     result.mode_used = actual_mode
     track_num = "0" if actual_mode == "Peak" else "1"
 
     if actual_mode == "Peak":
-        sample_peak = _measure.measure_sample_peak(file_path, tools)
+        sample_peak = _measure.measure_sample_peak(file_path, tools, cancel)
         result.measurement = Measurement(sample_peak=sample_peak)
         gain = compute_peak_gain(params, sample_peak)
     else:
         m = measurement
         if m is None or m.lufs is None or m.true_peak is None:
-            m = _measure.measure_loudness(file_path, tools)
+            m = _measure.measure_loudness(file_path, tools, cancel)
         result.measurement = m
         gain = compute_loudness_gain(params, m)
 
@@ -256,14 +287,11 @@ def normalize_file(
     tmp_base = os.path.basename(output_path)
     tmp_path = os.path.join(tmp_dir, f".{tmp_base}.{uuid.uuid4().hex[:8]}.part{ext}")
     map_args = build_map_args(ext)
+    metadata_args = build_metadata_args(ext, track_num, params.rekordbox)
     cmd = [
         tools.ffmpeg, "-y", "-hide_banner", "-nostdin", "-i", file_path,
         "-af", f"volume={gain}dB",
-    ] + map_args + codec_args + [
-        "-map_metadata", "0",          # Tags + Album-Cover erhalten
-        "-metadata", f"track={track_num}",
-        tmp_path,
-    ]
+    ] + map_args + codec_args + metadata_args + [tmp_path]
     try:
         if cancel is not None and cancel.is_set():
             raise CancelledError()

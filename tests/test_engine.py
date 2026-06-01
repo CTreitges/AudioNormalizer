@@ -122,3 +122,43 @@ def test_map_args_non_cover_containers_audio_only():
     # WAV/OGG/Opus: kein Video mappen -> kein Crash, kein Theora-Cover.
     for ext in (".wav", ".ogg", ".opus"):
         assert engine.build_map_args(ext) == ["-map", "0:a"]
+
+
+# ----------------------------- Rekordbox-Kompat --------------------------- #
+def test_rekordbox_wav_forces_24bit_no_float():
+    info = AudioInfo(channels=2, sample_rate=44100, bits_per_sample=32, sample_fmt="flt")
+    args = engine.build_codec_args(".wav", info, dither=True, rekordbox=True)
+    assert "pcm_s24le" in args
+    assert "pcm_f32le" not in args and "pcm_s32le" not in args
+    assert args[args.index("-rf64") + 1] == "never"
+
+
+def test_rekordbox_clamps_sample_rate_to_96k():
+    info = AudioInfo(channels=2, sample_rate=192000, bits_per_sample=24, sample_fmt="s32")
+    args = engine.build_codec_args(".wav", info, dither=True, rekordbox=True)
+    assert args[args.index("-ar") + 1] == "96000"
+
+
+def test_non_rekordbox_preserves_float_and_full_sr():
+    info = AudioInfo(channels=2, sample_rate=192000, bits_per_sample=32, sample_fmt="flt")
+    args = engine.build_codec_args(".wav", info, dither=True, rekordbox=False)
+    assert "pcm_f32le" in args
+    assert "-rf64" not in args
+    assert args[args.index("-ar") + 1] == "192000"
+
+
+def test_metadata_args_wav_stripped_in_rekordbox():
+    args = engine.build_metadata_args(".wav", "1", rekordbox=True)
+    assert args[:2] == ["-map_metadata", "-1"]
+    assert "track=1" in args
+
+
+def test_metadata_args_flac_keeps_tags():
+    args = engine.build_metadata_args(".flac", "0", rekordbox=True)
+    assert args[:2] == ["-map_metadata", "0"]
+    assert "track=0" in args
+
+
+def test_metadata_args_wav_kept_without_rekordbox():
+    args = engine.build_metadata_args(".wav", "1", rekordbox=False)
+    assert args[:2] == ["-map_metadata", "0"]

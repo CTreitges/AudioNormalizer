@@ -9,9 +9,9 @@ from typing import Dict, List, Optional
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout,
-    QLabel, QListWidget, QMainWindow, QMenu, QMessageBox, QProgressBar,
-    QPushButton, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
+    QHBoxLayout, QLabel, QListWidget, QMainWindow, QMenu, QMessageBox,
+    QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .. import __app_name__, ffmpeg_locator
@@ -71,6 +71,7 @@ QGroupBox::title {
     subcontrol-origin: margin; subcontrol-position: top left;
     padding: 0 5px; left: 10px;
 }
+QCheckBox { color: #333; font-weight: normal; }
 """
 
 # Dateifilter für Öffnen-Dialoge.
@@ -173,10 +174,25 @@ class NormalizerApp(QMainWindow):
         self.hint_peak = self._hint("(-3,0)", hint)
         self.hint_lufs = self._hint("(-11,0)", hint)
         self.hint_tp = self._hint("(-3,0)", hint)
-        self.hint_dev = self._hint("(3,0)", hint)
+        self.hint_dev = self._hint("(1,0)", hint)
         self.hint_ref = self._hint("(Auto)", hint)
 
         settings_layout.addWidget(self.params_widget)
+
+        # Überschreiben-Modus (Rekordbox CuePoints/Beatgrids erhalten).
+        self.chk_overwrite = QCheckBox(
+            "Originaldateien überschreiben (CuePoints in Rekordbox erhalten)")
+        self.chk_overwrite.setToolTip(
+            "Wenn aktiviert, werden die Originaldateien direkt überschrieben.\n"
+            "Dadurch bleiben CuePoints, Loops und Beatgrids in Rekordbox erhalten,\n"
+            "da Rekordbox Tracks anhand ihres Dateipfads identifiziert.\n\n"
+            "Es wird immer zuerst ein Backup-Ordner abgefragt."
+        )
+        self.chk_overwrite.setChecked(
+            self.settings.value("overwrite_original", "false") == "true")
+        self.chk_overwrite.stateChanged.connect(self._save_overwrite_setting)
+        settings_layout.addWidget(self.chk_overwrite)
+
         layout.addWidget(settings_group)
         self._toggle_params()
 
@@ -255,6 +271,10 @@ class NormalizerApp(QMainWindow):
         if path:
             self.edit_ffmpeg.setText(path)
             self._on_ffmpeg_edited()
+
+    def _save_overwrite_setting(self):
+        self.settings.setValue(
+            "overwrite_original", "true" if self.chk_overwrite.isChecked() else "false")
 
     # ------------------------------------------------------------------ #
     # Parameter-Sichtbarkeit
@@ -356,6 +376,7 @@ class NormalizerApp(QMainWindow):
             self.worker.cancel()
             self.btn_normalize.setText("Breche ab…")
             self.btn_normalize.setEnabled(False)
+            self.progress_bar.setFormat("Breche ab… %p%")
             return
 
         if not self.all_files:
@@ -375,7 +396,17 @@ class NormalizerApp(QMainWindow):
         params = self._gather_params()
 
         # Output-Mapping bestimmen.
-        if len(self.all_files) == 1:
+        backup_mapping = None
+        if self.chk_overwrite.isChecked():
+            # Überschreiben-Modus: Backup-Ordner abfragen, Originale ersetzen.
+            backup_dir = QFileDialog.getExistingDirectory(
+                self, "Backup-Ordner für Originaldateien wählen")
+            if not backup_dir:
+                return
+            mapping = {f: f for f in self.all_files}
+            backup_mapping = _batch.build_output_mapping(self.all_files, backup_dir)
+            self.current_target_dir = os.path.dirname(self.all_files[0])
+        elif len(self.all_files) == 1:
             src = self.all_files[0]
             ext = os.path.splitext(src)[1]
             target, _ = QFileDialog.getSaveFileName(
@@ -395,7 +426,8 @@ class NormalizerApp(QMainWindow):
         self.current_params = params
 
         self._set_running(True)
-        self.worker = NormalizeWorker(self.all_files, mapping, params, self.tools)
+        self.worker = NormalizeWorker(self.all_files, mapping, params, self.tools,
+                                      backup_mapping=backup_mapping)
         self.worker.phase.connect(self._on_phase)
         self.worker.progress.connect(self._on_progress)
         self.worker.error.connect(self._on_worker_error)
@@ -410,6 +442,7 @@ class NormalizerApp(QMainWindow):
         self.drop_zone.setEnabled(not running)
         self.edit_ffmpeg.setEnabled(not running)
         self.btn_browse.setEnabled(not running)
+        self.chk_overwrite.setEnabled(not running)
         self.progress_bar.setVisible(running)
         if running:
             self.btn_normalize.setText("Abbrechen")
@@ -458,7 +491,13 @@ class NormalizerApp(QMainWindow):
     def closeEvent(self, event):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
-            self.worker.wait(8000)
+            # Schließen erst zulassen, wenn der Worker-Thread wirklich beendet ist –
+            # sonst würde der QThread beim App-Shutdown zerstört, während er noch
+            # läuft ("QThread: Destroyed while thread is still running" -> Crash).
+            if not self.worker.wait(8000):
+                self.progress_bar.setFormat("Breche ab… %p%")
+                event.ignore()
+                return
         super().closeEvent(event)
 
 
