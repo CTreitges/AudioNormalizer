@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -14,9 +14,10 @@ from ..models import FileResult, NormalizeParams
 class NormalizeWorker(QThread):
     """Führt ``run_batch`` außerhalb des UI-Threads aus.
 
-    Die Fortschritts-Callbacks von ``run_batch`` feuern aus Pool-Threads; die
-    hier emittierten Signale werden von Qt thread-sicher in den UI-Thread
-    zugestellt (Queued Connection).
+    Die Fortschritts-Callbacks werden im ``run()``-Thread (dem Konsumenten der
+    ``as_completed``-Schleife) aufgerufen, nicht direkt aus den FFmpeg-Pool-
+    Threads. Die hier emittierten Signale stellt Qt via Queued Connection
+    thread-sicher in den UI-Thread zu – das ist der eigentliche Schutz.
     """
 
     phase = pyqtSignal(str, int)        # (name, total)
@@ -26,12 +27,14 @@ class NormalizeWorker(QThread):
     done = pyqtSignal(object)           # BatchResult
 
     def __init__(self, files: List[str], mapping: Dict[str, str],
-                 params: NormalizeParams, tools: FFmpegTools, parent=None):
+                 params: NormalizeParams, tools: FFmpegTools,
+                 backup_mapping: Optional[Dict[str, str]] = None, parent=None):
         super().__init__(parent)
         self._files = files
         self._mapping = mapping
         self._params = params
         self._tools = tools
+        self._backup_mapping = backup_mapping
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -46,7 +49,8 @@ class NormalizeWorker(QThread):
         )
         try:
             result = run_batch(self._files, self._mapping, self._params,
-                               self._tools, callbacks, self._cancel)
+                               self._tools, callbacks, self._cancel,
+                               backup_mapping=self._backup_mapping)
         except Exception as exc:  # defensiver Schutz – sollte nicht passieren
             result = BatchResult(error_count=1)
             self.error.emit(f"Unerwarteter Fehler: {exc}")

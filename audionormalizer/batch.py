@@ -158,6 +158,7 @@ def run_batch(
     tools: FFmpegTools,
     callbacks: Optional[BatchCallbacks] = None,
     cancel: Optional[threading.Event] = None,
+    backup_mapping: Optional[Dict[str, str]] = None,
 ) -> BatchResult:
     """Führt einen kompletten Normalisierungs-Lauf aus.
 
@@ -182,14 +183,22 @@ def run_batch(
         total = len(files)
         cb._phase("Analysiere Playlist", total)
         done = 0
+
+        def _analyze(f: str) -> Measurement:
+            # Bereits eingereihte Tasks brechen sofort ab; der laufende Decode
+            # wird über das Cancel-Event terminiert (kein Hängen bei Abbruch).
+            if cancel.is_set():
+                raise engine.CancelledError()
+            return _measure.measure_loudness(f, tools, cancel)
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(_measure.measure_loudness, f, tools): f for f in files
-            }
+            futures = {pool.submit(_analyze, f): f for f in files}
             for fut in as_completed(futures):
                 f = futures[fut]
                 try:
                     measurements[f] = fut.result()
+                except engine.CancelledError:
+                    measurements[f] = None
                 except Exception as exc:  # Messfehler -> kein Hard-Stop
                     measurements[f] = None
                     msg = f"Analyse-Fehler bei {os.path.basename(f)}: {exc}"
@@ -198,8 +207,6 @@ def run_batch(
                     cb._err(msg)
                 done += 1
                 cb._progress(done, total)
-                if cancel.is_set():
-                    break
         if cancel.is_set():
             result.cancelled = True
             return result
@@ -227,6 +234,7 @@ def run_batch(
         return engine.normalize_file(
             f, output_mapping[f], params, tools,
             measurement=measurements.get(f), cancel=cancel,
+            backup_path=(backup_mapping.get(f) if backup_mapping else None),
         )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:

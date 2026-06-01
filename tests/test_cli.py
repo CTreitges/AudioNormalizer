@@ -35,6 +35,27 @@ def test_parser_defaults():
     assert args.output == "out"
 
 
+def test_parser_max_dev_default_is_one():
+    args = cli._build_parser().parse_args(["x.wav", "-o", "out"])
+    assert args.max_dev == 1.0           # V4-Default
+
+
+def test_run_overwrite_requires_backup_dir(monkeypatch):
+    monkeypatch.setattr(cli.ffmpeg_locator, "locate",
+                        lambda *_a, **_k: FFmpegTools(ffmpeg="ffmpeg"))
+    monkeypatch.setattr(cli._batch, "collect_audio_files", lambda paths: ["a.wav"])
+    rc = cli.run(["a.wav", "--overwrite"])
+    assert rc == 1
+
+
+def test_run_requires_output_without_overwrite(monkeypatch):
+    monkeypatch.setattr(cli.ffmpeg_locator, "locate",
+                        lambda *_a, **_k: FFmpegTools(ffmpeg="ffmpeg"))
+    monkeypatch.setattr(cli._batch, "collect_audio_files", lambda paths: ["a.wav"])
+    rc = cli.run(["a.wav"])
+    assert rc == 1
+
+
 def test_warn_overwrite_detects_clash(tmp_path):
     f = str(tmp_path / "x.wav")
     assert cli._warn_overwrite({f: f}) == [f]

@@ -79,7 +79,8 @@ def _patch_engine(monkeypatch, fail_for=None):
     """Ersetzt die echte Engine durch eine schnelle Fake-Implementierung."""
     fail_for = fail_for or set()
 
-    def fake_normalize(f, out, params, tools, measurement=None, cancel=None):
+    def fake_normalize(f, out, params, tools, measurement=None, cancel=None,
+                       backup_path=None):
         if cancel is not None and cancel.is_set():
             raise batch.engine.CancelledError()
         if os.path.basename(f) in fail_for:
@@ -90,7 +91,7 @@ def _patch_engine(monkeypatch, fail_for=None):
 
     monkeypatch.setattr(batch.engine, "normalize_file", fake_normalize)
     monkeypatch.setattr(batch._measure, "measure_loudness",
-                        lambda f, tools: Measurement(lufs=-12.0, true_peak=-2.0))
+                        lambda f, tools, cancel=None: Measurement(lufs=-12.0, true_peak=-2.0))
 
 
 def test_run_batch_loudness_success(monkeypatch):
@@ -122,13 +123,14 @@ def test_run_batch_hybrid_manual_ref_still_analyzes(monkeypatch):
     # Bugfix-Regression: manueller Ref-Wert darf die Analyse NICHT überspringen.
     calls = {"n": 0}
 
-    def counting_measure(f, tools):
+    def counting_measure(f, tools, cancel=None):
         calls["n"] += 1
         return Measurement(lufs=-12.0, true_peak=-2.0)
 
     monkeypatch.setattr(batch._measure, "measure_loudness", counting_measure)
     monkeypatch.setattr(batch.engine, "normalize_file",
-                        lambda f, out, params, tools, measurement=None, cancel=None:
+                        lambda f, out, params, tools, measurement=None, cancel=None,
+                        backup_path=None:
                         FileResult(input_path=f, output_path=out, success=True))
     files = ["a.flac", "b.flac"]
     params = NormalizeParams(mode=Mode.HYBRID, ref_lufs_override=-9.0)
@@ -145,6 +147,25 @@ def test_run_batch_counts_errors(monkeypatch):
     assert res.success_count == 1
     assert res.error_count == 1
     assert res.ffmpeg_error
+
+
+def test_run_batch_passes_backup_path(monkeypatch):
+    seen = {}
+
+    def rec_normalize(f, out, params, tools, measurement=None, cancel=None,
+                      backup_path=None):
+        seen[f] = backup_path
+        return FileResult(input_path=f, output_path=out, success=True)
+
+    monkeypatch.setattr(batch.engine, "normalize_file", rec_normalize)
+    files = ["a.flac", "b.flac"]
+    mapping = {f: f for f in files}                       # Überschreiben
+    backup = {"a.flac": "bak/a.flac", "b.flac": "bak/b.flac"}
+    res = run_batch(files, mapping, NormalizeParams(mode=Mode.LOUDNESS), FAKE_TOOLS,
+                    backup_mapping=backup)
+    assert res.success_count == 2
+    assert seen["a.flac"] == "bak/a.flac"
+    assert seen["b.flac"] == "bak/b.flac"
 
 
 def test_run_batch_cancel(monkeypatch):

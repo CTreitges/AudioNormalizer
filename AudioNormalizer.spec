@@ -2,11 +2,16 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # Gebündelte FFmpeg-Binary (imageio-ffmpeg) + Icon mitnehmen.
+# Nur das binaries/-Verzeichnis einsammeln (nicht den ganzen Paket-Datenbestand);
+# imageio_ffmpeg.get_ffmpeg_exe() löst die Binary ab 0.5.0 über
+# importlib.resources gegen das Subpaket imageio_ffmpeg.binaries auf -> dieses
+# muss explizit als Hidden-Import mit. (Der Auto-Hook von hooks-contrib täte das
+# zwar auch, aber wir machen es selbst-enthaltend.)
 datas = [('icon.ico', '.')]
-datas += collect_data_files('imageio_ffmpeg')
+datas += collect_data_files('imageio_ffmpeg', subdir='binaries')
 
-# Alle Submodule des eigenen Pakets sicher einsammeln (GUI wird dynamisch geladen).
-hiddenimports = collect_submodules('audionormalizer')
+# Eigene Submodule (GUI wird dynamisch geladen) + imageio-Binary-Subpaket.
+hiddenimports = collect_submodules('audionormalizer') + ['imageio_ffmpeg.binaries']
 
 a = Analysis(
     ['normalizer.py'],

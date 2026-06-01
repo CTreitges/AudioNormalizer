@@ -34,11 +34,30 @@ class FFmpegTools:
         return bool(self.ffprobe)
 
 
+def _ensure_executable(path: str) -> None:
+    """Setzt unter POSIX das +x-Bit, falls es fehlt.
+
+    Die gebündelte imageio-ffmpeg-Binary wird als DATA-Datei mitgeliefert und
+    verliert auf Linux/macOS dabei oft das Ausführbar-Bit – ohne diesen Fix
+    wäre die mitgelieferte Binary dort nicht nutzbar.
+    """
+    if os.name == "nt" or not os.path.isfile(path):
+        return
+    if os.access(path, os.X_OK):
+        return
+    try:
+        mode = os.stat(path).st_mode
+        os.chmod(path, mode | 0o111)
+    except OSError:
+        pass
+
+
 def _is_valid(path: Optional[str]) -> bool:
     if not path:
         return False
     if not (os.path.isfile(path) or shutil.which(path)):
         return False
+    _ensure_executable(path)
     try:
         return run([path, "-version"], timeout=15).returncode == 0
     except Exception:

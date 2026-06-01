@@ -2,7 +2,7 @@
 
 Ein Werkzeug zur Normalisierung von Audio-Dateien mit Fokus auf **höchste Klangqualität** und **vollständigen Erhalt der Dynamik**. Statt Kompression wird ausschließlich **lineare Verstärkung** verwendet – der Klangcharakter bleibt unverändert.
 
-> **Version 2.0** – komplett überarbeitet: testbare Kern-Engine, automatische FFmpeg-Erkennung mit mitgelieferter Binary, zusätzliche Formate, Headless-CLI und zahlreiche Bugfixes (siehe [Changelog](#changelog)).
+> **V5** – komplett überarbeitete, modulare Architektur (testbare Kern-Engine, automatische FFmpeg-Erkennung mit mitgelieferter Binary, zusätzliche Formate, Headless-CLI) **vereint mit** den V4-Features (Rekordbox-Kompatibilität, Überschreiben-Modus mit Backup). Siehe [Changelog](#changelog).
 
 ---
 
@@ -11,7 +11,9 @@ Ein Werkzeug zur Normalisierung von Audio-Dateien mit Fokus auf **höchste Klang
 - **Drei Normalisierungs-Modi**: Peak, Loudness (EBU R128) und ein intelligenter Hybrid-Modus.
 - **Erhalt der Dynamik**: lineare Verstärkung statt Kompression – die Abstände zwischen leisen und lauten Passagen bleiben zu 100 % erhalten.
 - **Clipping-Schutz**: ein konfigurierbares **Max True Peak**-Limit deckelt die Verstärkung, sodass es nie zu Übersteuerung kommt.
-- **Metadaten- & Cover-Schutz**: Tags (Titel, Interpret, Album) **und das Album-Cover** bleiben erhalten.
+- **Rekordbox-Kompatibilität**: WAV/FLAC werden Rekordbox-tauglich erzeugt (max. 24-bit Integer, max. 96 kHz, Standard-RIFF-WAV ohne RF64; bei WAV werden problematische Metadaten-Chunks entfernt).
+- **Originaldateien überschreiben**: optionaler Modus, der die Quelldateien direkt ersetzt (mit Pflicht-Backup) – so bleiben CuePoints, Loops und Beatgrids in Rekordbox erhalten.
+- **Metadaten- & Cover-Schutz**: bei FLAC/MP3/M4A bleiben Tags (Titel, Interpret, Album) **und das Album-Cover** erhalten (WAV im Rekordbox-Modus bewusst ohne Metadaten).
 - **Viele Formate**: WAV, FLAC (verlustfrei) sowie MP3, M4A/AAC, OGG, Opus.
 - **Automatische FFmpeg-Erkennung**: findet FFmpeg im PATH, an üblichen Orten oder nutzt die **mitgelieferte Binary** – in der Regel keine Konfiguration nötig.
 - **Multithreading**: mehrere Dateien werden parallel analysiert und verarbeitet.
@@ -47,8 +49,15 @@ Für Playlists/Alben (mindestens 2 Dateien). Zuerst werden **alle** Tracks analy
 | **Ziel Peak (dB)** | Maximaler Sample-Pegel bei Peak-Normalisierung | -3,0 |
 | **Ziel Loudness (LUFS)** | Gewünschte Ziel-Lautheit | -11,0 |
 | **Max True Peak (dB)** | Sicherheitslimit gegen Clipping | -3,0 |
-| **Max. Abweichung (dB)** | Toleranzbereich im Hybrid-Modus | 3,0 |
+| **Max. Abweichung (dB)** | Toleranzbereich im Hybrid-Modus | 1,0 |
 | **Referenz LUFS** | Feste Basis für Hybrid (oder „Auto") | Auto |
+
+---
+
+## Rekordbox & Überschreiben-Modus
+
+- **Rekordbox-Kompatibilität** (Standard): WAV/FLAC-Ausgaben werden auf max. 24-bit Integer und max. 96 kHz begrenzt, WAV als Standard-RIFF (kein RF64) erzeugt und WAV-Quell-Metadaten entfernt. Per CLI mit `--no-rekordbox` abschaltbar; verlustbehaftete Formate sind davon nicht betroffen.
+- **Originaldateien überschreiben**: In der GUI die Checkbox aktivieren (es wird ein Backup-Ordner abgefragt); per CLI `--overwrite --backup-dir <ordner>`. Die Originale werden – nach Sicherung ins Backup – atomar ersetzt, sodass ihr Dateipfad gleich bleibt und Rekordbox CuePoints/Beatgrids behält.
 
 ---
 
@@ -83,9 +92,12 @@ python -m audionormalizer.cli -o out.flac --mode loudness --target-lufs -14 inpu
 
 # Nur anzeigen, was passieren würde (nichts schreiben)
 python -m audionormalizer.cli --dry-run --mode peak *.wav -o out/
+
+# Originaldateien überschreiben (mit Backup) – Rekordbox-CuePoints bleiben erhalten
+python -m audionormalizer.cli --overwrite --backup-dir backup/ --mode loudness playlist/
 ```
 
-Wichtige Optionen: `--mode {peak,loudness,hybrid}`, `--target-peak`, `--target-lufs`, `--target-tp`, `--max-dev`, `--ref-lufs`, `--format {wav,flac,mp3,m4a,aac,ogg,opus}`, `--suffix _norm`, `--workers N`, `--no-dither`, `--ffmpeg PFAD`, `--no-log`, `--dry-run`, `-v`.
+Wichtige Optionen: `--mode {peak,loudness,hybrid}`, `--target-peak`, `--target-lufs`, `--target-tp`, `--max-dev`, `--ref-lufs`, `--format {wav,flac,mp3,m4a,aac,ogg,opus}`, `--suffix _norm`, `--overwrite` + `--backup-dir`, `--no-rekordbox`, `--workers N`, `--no-dither`, `--ffmpeg PFAD`, `--no-log`, `--dry-run`, `-v`.
 
 ---
 
@@ -116,11 +128,19 @@ Die gesamte Logik ist UI-frei und damit test- und scriptbar. Tests: `python -m p
 - **FFmpeg** wird automatisch erkannt; die gebündelte Binary (imageio-ffmpeg) enthält kein `ffprobe` – die Stream-Analyse fällt dann auf das Parsen von `ffmpeg -i` zurück.
 - **Bittiefe & Sample-Rate** verlustfreier Formate werden übernommen (24-bit-FLAC bleibt 24-bit). Bei Reduktion auf 16 bit wird Dither (triangular) angewandt.
 - **Opus** wird immer auf 48 kHz resampled (libopus-Vorgabe).
+- **Rekordbox-Modus** (Standard für WAV/FLAC): max. 24-bit/96 kHz, Standard-RIFF-WAV, WAV ohne Quell-Metadaten. Auf der Linux/macOS-Build wird die gebündelte FFmpeg-Binary bei Bedarf ausführbar gemacht.
 - Das Feld „Titelnummer" (Track) wird als Indikator überschrieben (0 = Peak, 1 = Loudness).
 
 ---
 
-## Changelog (v2.0)
+## Changelog
+
+### V5 – Vereinigung von Umbau + V4-Features
+- Modulare Neufassung (siehe unten) **integriert** mit den V4-Features: Rekordbox-Kompatibilität (WAV/FLAC max. 24-bit/96 kHz, RIFF, WAV-Metadaten-Strip), Überschreiben-Modus mit Pflicht-Backup, Default Max-Abweichung 1,0 dB.
+- Überschreiben + Backup nutzen das atomare Temp+Replace der neuen Engine; Backup erhält die Ordnerstruktur.
+- Review-Fixes: abbrechbare Hybrid-Analyse-Phase, sauberer Fenster-Schließen-Pfad (kein QThread-Crash), gebündelte FFmpeg-Binary unter Linux/macOS ausführbar, Cancel-Feedback im Fortschritt.
+
+### v2.0 – Komplett-Überarbeitung
 
 **Bugfixes**
 - „WAV-Peak ohne FFmpeg" war nie implementiert (`audioop`/`tempfile`/`shutil` importiert, aber ungenutzt) – die irreführende Logik wurde entfernt; FFmpeg wird sauber erkannt/gebündelt.
