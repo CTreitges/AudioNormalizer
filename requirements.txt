@@ -1,2 +1,5 @@
 PyQt6
 imageio-ffmpeg
+# Pillow: NICHT entfernen – PyInstaller braucht es auf Windows zur Icon-Konvertierung
+# (icon.ico ist nicht im strikten ICO-Format). Wird NICHT in die EXE gebündelt.
+Pillow
