@@ -2,7 +2,7 @@
 
 Ein Werkzeug zur Normalisierung von Audio-Dateien mit Fokus auf **höchste Klangqualität** und **vollständigen Erhalt der Dynamik**. Statt Kompression wird ausschließlich **lineare Verstärkung** verwendet – der Klangcharakter bleibt unverändert.
 
-> **V5** – komplett überarbeitete, modulare Architektur (testbare Kern-Engine, automatische FFmpeg-Erkennung mit mitgelieferter Binary, zusätzliche Formate, Headless-CLI) **vereint mit** den V4-Features (Rekordbox-Kompatibilität, Überschreiben-Modus mit Backup). Siehe [Changelog](#changelog).
+> **V6** – Schwerpunkt **Ordner-Verarbeitung**: die Unterordner-Struktur bleibt jetzt zuverlässig erhalten, Namenskonflikte werden vor dem Lauf erkannt statt still eine Datei zu verlieren, und die Oberfläche meldet jede Datei einzeln zurück. Siehe [Changelog](#changelog).
 
 ---
 
@@ -14,6 +14,7 @@ Ein Werkzeug zur Normalisierung von Audio-Dateien mit Fokus auf **höchste Klang
 - **Rekordbox-Kompatibilität**: WAV/FLAC werden Rekordbox-tauglich erzeugt (max. 24-bit Integer, max. 96 kHz, Standard-RIFF-WAV ohne RF64; bei WAV werden problematische Metadaten-Chunks entfernt).
 - **Originaldateien überschreiben**: optionaler Modus, der die Quelldateien direkt ersetzt (mit Pflicht-Backup) – so bleiben CuePoints, Loops und Beatgrids in Rekordbox erhalten.
 - **Metadaten- & Cover-Schutz**: bei FLAC/MP3/M4A bleiben Tags (Titel, Interpret, Album) **und das Album-Cover** erhalten (WAV im Rekordbox-Modus bewusst ohne Metadaten).
+- **Ganze Ordner am Stück**: rekursiv, mit **erhaltener Unterordner-Struktur**; Namenskonflikte werden vor dem Lauf erkannt, versteckte Dateien und der eigene Output früherer Läufe übersprungen.
 - **Viele Formate**: WAV, FLAC (verlustfrei) sowie MP3, M4A/AAC, OGG, Opus.
 - **Automatische FFmpeg-Erkennung**: findet FFmpeg im PATH, an üblichen Orten oder nutzt die **mitgelieferte Binary** – in der Regel keine Konfiguration nötig.
 - **Multithreading**: mehrere Dateien werden parallel analysiert und verarbeitet.
@@ -51,6 +52,25 @@ Für Playlists/Alben (mindestens 2 Dateien). Zuerst werden **alle** Tracks analy
 | **Max True Peak (dB)** | Sicherheitslimit gegen Clipping | -3,0 |
 | **Max. Abweichung (dB)** | Toleranzbereich im Hybrid-Modus | 1,0 |
 | **Referenz LUFS** | Feste Basis für Hybrid (oder „Auto") | Auto |
+
+---
+
+## Ganze Ordner normalisieren
+
+Ordner können per Drag & Drop, über „Ordner auswählen" oder als CLI-Argument übergeben werden. Es gilt:
+
+- **Struktur bleibt erhalten**: Der übergebene Ordner ist die Basis. Aus `Musik/Album A/Disc 2/track.flac` wird `Ziel/Album A/Disc 2/track.flac`. Einzeln ausgewählte Dateien landen flach im Zielordner.
+- **Übersprungen werden**: nicht unterstützte Formate, versteckte Dateien und Ordner (inkl. Reste abgebrochener Läufe und AppleDouble-Dateien) sowie alles, was im Zielordner liegt – damit ein zweiter Lauf nicht den eigenen Output erneut verstärkt.
+- **Namenskonflikte brechen den Lauf ab**, bevor etwas geschrieben wird. Sie entstehen etwa bei erzwungenem Ausgabeformat (`x.wav` + `x.flac` → beide `x.mp3`) oder bei mehreren Quellordnern mit gleich benannten Unterordnern. Abhilfe: `--suffix` verwenden oder ohne `--format` laufen lassen.
+- **Fortschritt pro Datei**: In der Oberfläche bekommt jede Zeile ✓ bzw. ✗ mit Verfahren und angewandter Verstärkung.
+
+Verifizieren lässt sich ein kompletter Ordnerlauf mit:
+
+```bash
+python scripts/verify_folder_run.py "C:/Musik" --out "C:/Musik-norm" --mode loudness --target-lufs -14 --target-tp -1
+```
+
+Das Skript prüft Struktur, Zielpegel je Datei, Temp-Reste und Protokoll-Ablage.
 
 ---
 
@@ -116,7 +136,8 @@ audionormalizer/
   cli.py             # Headless-Kommandozeile
   gui/               # dünne PyQt6-Schicht (app, worker, widgets)
 tests/               # pytest-Suite (läuft ohne FFmpeg, Subprozesse gemockt)
-scripts/             # verify_roundtrip.py – End-to-End-Verifikation des Vertrags
+scripts/             # verify_roundtrip.py   – Einzeldatei: Ziel getroffen, kein Clipping
+                     # verify_folder_run.py  – ganzer Ordner: Struktur, Pegel, Protokoll
 ```
 
 Die gesamte Logik ist UI-frei und damit test- und scriptbar. Tests: `python -m pytest`.
@@ -134,6 +155,28 @@ Die gesamte Logik ist UI-frei und damit test- und scriptbar. Tests: `python -m p
 ---
 
 ## Changelog
+
+### V6 – Ordner-Verarbeitung
+
+**Behoben**
+- **Unterordner-Struktur ging verloren.** Die Zielstruktur wurde aus dem gemeinsamen Pfad der *gefundenen* Dateien abgeleitet statt aus dem *ausgewählten* Ordner. Lagen alle Treffer in einem einzigen Unterordner (`Musik/Album/*.mp3`), landete alles flach im Ziel – der Ordner `Album` verschwand. Eine einzelne Datei tief im Baum verlor ihre Struktur komplett.
+- **Namenskonflikte gingen still verloren.** Zwei Quellen auf einem Zielpfad (z.B. `x.wav` + `x.flac` mit `--format mp3`, oder gleich benannte Unterordner aus mehreren Quellordnern) überschrieben sich gegenseitig – bei paralleler Verarbeitung nicht einmal vorhersagbar welche. Solche Konflikte werden jetzt **vor** dem Lauf erkannt und führen zum Abbruch mit Auflistung der Kollisionen. Für Backup-Pfade im Überschreiben-Modus gilt das besonders: dort hätte ein Konflikt das Original unwiederbringlich gemacht.
+- **Abgestürzte Läufe hinterließen Wiedergänger.** Liegengebliebene Temp-Dateien tragen die echte Endung und wurden beim nächsten Lauf erneut als Eingabe eingesammelt – also ein zweites Mal verstärkt. Versteckte Dateien und Ordner werden nun übersprungen (das erledigt zugleich AppleDouble-Reste wie `._track.mp3` von Mac-kopierten Ordnern).
+- **Zielordner im Quellordner** führte beim zweiten Lauf zur doppelten Verstärkung des eigenen Outputs. Betroffene Dateien werden jetzt mit Hinweis übersprungen.
+- **Parallele FFmpeg-Prozesse teilten sich die Konsole.** Ohne abgekoppeltes `stdin` konkurrierten mehrere Prozesse eines Stapellaufs um dieselbe Eingabe, was den Lauf ins Stocken bringen konnte.
+- **Protokoll landete in einem beliebigen Unterordner**, sobald Struktur erhalten blieb (nicht-deterministische Auswahl). Es liegt jetzt immer im gewählten Zielordner.
+- **FFmpeg-Versionsmix**: zu einer mitgelieferten `ffmpeg`-Binary wurde ein fremdes `ffprobe` aus dem `PATH` gegriffen. Ein `ffprobe` aus dem `PATH` wird nur noch akzeptiert, wenn auch `ffmpeg` von dort stammt.
+- **Lautheitsmessung konnte gekapert werden**: ein beliebiger anderer `{...}`-Block in der FFmpeg-Ausgabe wurde für das Messergebnis gehalten.
+
+**Oberfläche**
+- **Rückmeldung pro Datei**: die Liste zeigt jetzt ✓/✗ mit angewandtem Verfahren und Verstärkung, statt nur einen Fortschrittsbalken. Bei großen Ordnern ist sichtbar, was gerade passiert.
+- **Layout-Fehler behoben**: die Eingabefelder wurden je nach Modus zusammengequetscht, teils auf null Höhe, und die Drop-Zone legte sich über die Überschreiben-Checkbox.
+- Dateien werden mit ihrem Pfad **relativ zum gewählten Ordner** angezeigt.
+- Ein eingetragener, aber nicht nutzbarer FFmpeg-Pfad wird als solcher gemeldet, statt unter einem grünen Haken ein anderes Binary zu verwenden.
+- Ein Ordner ohne Audiodateien gibt eine Rückmeldung, statt kommentarlos nichts zu tun.
+
+**Bewusst nicht geändert**
+- Lautheits- und Sample-Peak-Messung in *einem* FFmpeg-Durchlauf zusammenzufassen (rund 27 % schneller im Hybrid-Modus) wurde verworfen: gegen zwei getrennte Messungen wich der True Peak um bis zu 0,02 dB ab – genau der Wert, der das Clipping-Limit setzt.
 
 ### V5 – Vereinigung von Umbau + V4-Features
 - Modulare Neufassung (siehe unten) **integriert** mit den V4-Features: Rekordbox-Kompatibilität (WAV/FLAC max. 24-bit/96 kHz, RIFF, WAV-Metadaten-Strip), Überschreiben-Modus mit Pflicht-Backup, Default Max-Abweichung 1,0 dB.

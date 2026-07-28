@@ -5,8 +5,9 @@ import pytest
 
 from audionormalizer import batch
 from audionormalizer.batch import (
-    BatchCallbacks, build_output_mapping, collect_audio_files,
-    compute_reference_lufs, run_batch,
+    BatchCallbacks, build_output_mapping, collect_audio_files, collect_selection,
+    compute_reference_lufs, exclude_under, find_target_collisions,
+    infer_source_folder, run_batch,
 )
 from audionormalizer.ffmpeg_locator import FFmpegTools
 from audionormalizer.models import FileResult, Measurement, Mode, NormalizeParams
@@ -26,6 +27,136 @@ def test_collect_recursive_filtered_dedupe(tmp_path):
     files = collect_audio_files([str(tmp_path), str(tmp_path / "a.wav")])
     names = sorted(os.path.basename(f) for f in files)
     assert names == ["a.wav", "b.flac", "d.mp3"]   # txt raus, a.wav nur 1x
+
+
+def test_collect_skips_leftover_temp_and_hidden_files(tmp_path):
+    """Reste eines abgestürzten Laufs dürfen nicht erneut normalisiert werden."""
+    (tmp_path / "song.mp3").write_bytes(b"x")
+    (tmp_path / ".song.mp3.deadbeef.part.mp3").write_bytes(b"x")   # Temp-Rest
+    (tmp_path / "._song.mp3").write_bytes(b"x")                    # AppleDouble
+    names = [os.path.basename(f) for f in collect_audio_files([str(tmp_path)])]
+    assert names == ["song.mp3"]
+
+
+def test_collect_skips_hidden_directories(tmp_path):
+    hidden = tmp_path / ".Trashes"
+    hidden.mkdir()
+    (hidden / "old.mp3").write_bytes(b"x")
+    (tmp_path / "keep.mp3").write_bytes(b"x")
+    names = [os.path.basename(f) for f in collect_audio_files([str(tmp_path)])]
+    assert names == ["keep.mp3"]
+
+
+def test_collect_selection_records_folder_as_base(tmp_path):
+    sub = tmp_path / "Album"
+    sub.mkdir()
+    (sub / "a.mp3").write_bytes(b"x")
+    sel = collect_selection([str(tmp_path)])
+    assert sel.bases[sel.files[0]] == str(tmp_path)
+
+
+def test_collect_selection_single_file_has_no_base(tmp_path):
+    f = tmp_path / "a.mp3"
+    f.write_bytes(b"x")
+    sel = collect_selection([str(f)])
+    assert sel.bases[sel.files[0]] == ""
+
+
+# ----------------------------- Output-Mapping ----------------------------- #
+def test_mapping_keeps_subfolder_when_all_files_share_one(tmp_path):
+    """Regression: ``Musik/Album/*.mp3`` kollabierte im Ziel zu flachen Dateien.
+
+    Die Basis wurde aus dem commonpath der Fundstellen geraten – der zeigt hier
+    auf ``Album``, wodurch der Ordnername im Ziel verschwand.
+    """
+    album = tmp_path / "Musik" / "Album"
+    album.mkdir(parents=True)
+    (album / "a.mp3").write_bytes(b"x")
+    (album / "b.mp3").write_bytes(b"x")
+    sel = collect_selection([str(tmp_path / "Musik")])
+    mapping = build_output_mapping(sel.files, "ZIEL", sel.bases)
+    assert sorted(os.path.relpath(p, "ZIEL") for p in mapping.values()) == [
+        os.path.join("Album", "a.mp3"), os.path.join("Album", "b.mp3")]
+
+
+def test_mapping_keeps_deep_structure_for_single_file(tmp_path):
+    """Regression: eine einzelne Datei tief im Baum verlor ihre ganze Struktur."""
+    deep = tmp_path / "Musik" / "Album" / "Disc1"
+    deep.mkdir(parents=True)
+    (deep / "only.mp3").write_bytes(b"x")
+    sel = collect_selection([str(tmp_path / "Musik")])
+    mapping = build_output_mapping(sel.files, "ZIEL", sel.bases)
+    assert os.path.relpath(next(iter(mapping.values())), "ZIEL") == \
+        os.path.join("Album", "Disc1", "only.mp3")
+
+
+def test_mapping_loose_files_stay_flat(tmp_path):
+    """Direkt ausgewählte Einzeldateien landen flach im Zielordner."""
+    a = tmp_path / "x" / "a.mp3"
+    a.parent.mkdir()
+    a.write_bytes(b"x")
+    sel = collect_selection([str(a)])
+    mapping = build_output_mapping(sel.files, "ZIEL", sel.bases)
+    assert mapping[sel.files[0]] == os.path.join("ZIEL", "a.mp3")
+
+
+# --------------------------- Ziel-Kollisionen ----------------------------- #
+def test_find_collisions_detects_format_clash(tmp_path):
+    """``x.wav`` + ``x.flac`` -> beide ``x.mp3``: parallel = stiller Datenverlust."""
+    for name in ("x.wav", "x.flac"):
+        (tmp_path / name).write_bytes(b"x")
+    sel = collect_selection([str(tmp_path)])
+    mapping = {src: os.path.join("ZIEL", "x.mp3") for src in sel.files}
+    collisions = find_target_collisions(mapping)
+    assert len(collisions) == 1
+    assert len(next(iter(collisions.values()))) == 2
+
+
+def test_find_collisions_detects_same_named_subfolders(tmp_path):
+    """Zwei ausgewählte Ordner mit gleich benanntem Unterordner."""
+    for root in ("R1", "R2"):
+        d = tmp_path / root / "Album"
+        d.mkdir(parents=True)
+        (d / "a.mp3").write_bytes(b"x")
+    sel = collect_selection([str(tmp_path / "R1"), str(tmp_path / "R2")])
+    mapping = build_output_mapping(sel.files, "ZIEL", sel.bases)
+    assert find_target_collisions(mapping)          # muss auffallen
+
+
+def test_find_collisions_empty_for_clean_mapping():
+    assert find_target_collisions({"a.wav": "o/a.wav", "b.wav": "o/b.wav"}) == {}
+
+
+def test_format_collisions_is_readable():
+    txt = batch.format_collisions({"/z/x.mp3": ["/s/x.wav", "/s/x.flac"]})
+    assert "x.mp3" in txt and "x.wav" in txt and "x.flac" in txt
+
+
+# --------------------- Eigenen Output nicht wieder einlesen ---------------- #
+def test_exclude_under_skips_previous_output(tmp_path):
+    """Zielordner im Quellordner: sonst wird der Gain ein zweites Mal angewandt."""
+    (tmp_path / "song.mp3").write_bytes(b"x")
+    out = tmp_path / "normalized"
+    out.mkdir()
+    (out / "song.mp3").write_bytes(b"x")
+    files = collect_audio_files([str(tmp_path)])
+    assert len(files) == 2
+    kept = exclude_under(files, str(out))
+    assert [os.path.basename(f) for f in kept] == ["song.mp3"]
+    assert os.path.dirname(kept[0]) == str(tmp_path)
+
+
+def test_exclude_under_without_directory_keeps_all():
+    assert exclude_under(["a.wav", "b.wav"], "") == ["a.wav", "b.wav"]
+
+
+# --------------------------- Log-Ordnername -------------------------------- #
+def test_infer_source_folder_uses_selected_root(tmp_path):
+    album = tmp_path / "Meine Musik" / "Album"
+    album.mkdir(parents=True)
+    (album / "a.mp3").write_bytes(b"x")
+    sel = collect_selection([str(tmp_path / "Meine Musik")])
+    assert infer_source_folder(sel.files, sel.bases) == "Meine Musik"
 
 
 # ----------------------------- Output-Mapping ----------------------------- #
@@ -166,6 +297,18 @@ def test_run_batch_passes_backup_path(monkeypatch):
     assert res.success_count == 2
     assert seen["a.flac"] == "bak/a.flac"
     assert seen["b.flac"] == "bak/b.flac"
+
+
+def test_run_batch_reports_file_done_for_failures(monkeypatch):
+    """Auch Fehlschläge melden 'Datei fertig' – sonst bleibt die UI-Zeile leer."""
+    _patch_engine(monkeypatch, fail_for={"b.flac"})
+    seen = []
+    cb = BatchCallbacks(on_file_done=lambda r: seen.append((os.path.basename(r.input_path),
+                                                            r.success)))
+    files = ["a.flac", "b.flac"]
+    run_batch(files, {f: f for f in files}, NormalizeParams(mode=Mode.LOUDNESS),
+              FAKE_TOOLS, cb)
+    assert sorted(seen) == [("a.flac", True), ("b.flac", False)]
 
 
 def test_run_batch_cancel(monkeypatch):

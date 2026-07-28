@@ -22,29 +22,91 @@ from . import measure as _measure
 # --------------------------------------------------------------------------- #
 # Datei-Sammlung & Output-Mapping (reine Funktionen)
 # --------------------------------------------------------------------------- #
-def collect_audio_files(paths: List[str]) -> List[str]:
-    """Sammelt unterstützte Audiodateien aus Dateien/Ordnern (rekursiv, dedupe)."""
+@dataclass(frozen=True)
+class Selection:
+    """Gefundene Dateien plus die Herkunft ihrer Ordnerstruktur.
+
+    ``bases`` merkt sich pro Datei den ausgewählten Ordner, relativ zu dem die
+    Unterordner-Struktur im Ziel erhalten bleibt. Für einzeln ausgewählte
+    Dateien ist der Eintrag ``""`` – die landen flach im Zielordner.
+
+    Ohne diese Herkunft müsste das Mapping die Basis aus dem ``commonpath``
+    der Fundstellen raten. Das kollabiert genau dann, wenn alle Treffer in
+    *einem* Unterordner liegen (``Musik/Album/*.mp3`` -> Ziel flach, ``Album``
+    verschwindet) oder wenn nur eine einzige Datei tief im Baum liegt.
+    """
+
+    files: List[str] = field(default_factory=list)
+    bases: Dict[str, str] = field(default_factory=dict)
+
+
+def _is_supported(name: str) -> bool:
+    """Unterstützte Endung und keine versteckte Datei.
+
+    Der Punkt-Filter hält zwei Sorten Müll draußen, die sonst als Track
+    durchgehen: liegengebliebene ``.<name>.<hex>.part.<ext>``-Temp-Dateien
+    eines abgestürzten Laufs (die würden sonst ein zweites Mal verstärkt) und
+    AppleDouble-Reste (``._track.mp3``) von Mac-kopierten Ordnern.
+    """
+    return not name.startswith(".") and name.lower().endswith(SUPPORTED_EXTS)
+
+
+def collect_selection(paths: List[str]) -> Selection:
+    """Sammelt Audiodateien aus Dateien/Ordnern (rekursiv, dedupe) MIT Herkunft.
+
+    Ein übergebener Ordner wird selbst zur Basis: ``<Ordner>/Album/a.mp3``
+    landet später unter ``<Ziel>/Album/a.mp3``. Einzeln übergebene Dateien
+    bekommen keine Basis und landen flach.
+    """
     found: List[str] = []
+    bases: Dict[str, str] = {}
     seen = set()
 
-    def _add(p: str):
+    def _add(p: str, base: str):
         ap = os.path.abspath(p)
-        if ap not in seen and p.lower().endswith(SUPPORTED_EXTS):
-            seen.add(ap)
-            found.append(p)
+        if ap in seen or not _is_supported(os.path.basename(p)):
+            return
+        seen.add(ap)
+        found.append(p)
+        bases[p] = base
 
     for path in paths:
         if os.path.isdir(path):
-            for root, _dirs, files in os.walk(path):
+            base = os.path.abspath(path)
+            for root, dirs, files in os.walk(path):
+                # Versteckte Unterordner (.git, .Trashes, …) gar nicht betreten.
+                dirs[:] = sorted(d for d in dirs if not d.startswith("."))
                 for f in sorted(files):
-                    _add(os.path.join(root, f))
+                    _add(os.path.join(root, f), base)
         elif os.path.isfile(path):
-            _add(path)
-    return found
+            _add(path, "")
+    return Selection(files=found, bases=bases)
 
 
-def build_output_mapping(files: List[str], target_dir: str) -> Dict[str, str]:
+def collect_audio_files(paths: List[str]) -> List[str]:
+    """Sammelt unterstützte Audiodateien aus Dateien/Ordnern (rekursiv, dedupe)."""
+    return collect_selection(paths).files
+
+
+def _relative_target(f: str, base: str) -> Optional[str]:
+    """Zielpfad relativ zur Basis – ``None``, wenn die Basis nicht trägt."""
+    if not base:
+        return None
+    try:
+        rel = os.path.relpath(os.path.abspath(f), base)
+    except ValueError:      # anderes Laufwerk (Windows)
+        return None
+    return None if rel.startswith("..") else rel
+
+
+def build_output_mapping(files: List[str], target_dir: str,
+                         bases: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Bildet Quell- auf Zielpfade ab und erhält die Unterordner-Struktur.
+
+    Mit ``bases`` (aus :func:`collect_selection`) wird die Struktur relativ zum
+    tatsächlich ausgewählten Ordner erhalten. Ohne ``bases`` – etwa bei einer
+    direkt übergebenen Dateiliste – wird die Basis wie bisher aus dem
+    ``commonpath`` abgeleitet.
 
     Robust gegen unterschiedliche Laufwerke (Windows): dort wird auf den
     Dateinamen zurückgefallen statt zu crashen (``commonpath``-ValueError).
@@ -66,21 +128,62 @@ def build_output_mapping(files: List[str], target_dir: str) -> Dict[str, str]:
 
     for f in files:
         rel: Optional[str] = None
-        if common:
-            try:
-                rel = os.path.relpath(os.path.abspath(f), common)
-            except ValueError:
-                rel = None
-        if not rel or rel.startswith(".."):
-            rel = os.path.basename(f)
-        mapping[f] = os.path.join(target_dir, rel)
+        if bases is not None and f in bases:
+            rel = _relative_target(f, bases[f])
+        else:
+            rel = _relative_target(f, common) if common else None
+        mapping[f] = os.path.join(target_dir, rel or os.path.basename(f))
     return mapping
 
 
-def infer_source_folder(files: List[str]) -> str:
+def find_target_collisions(mapping: Dict[str, str]) -> Dict[str, List[str]]:
+    """Findet Zielpfade, auf die mehr als eine Quelle abgebildet wird.
+
+    Das ist ein Muss vor jedem Lauf: die Dateien werden **parallel** verarbeitet,
+    zwei Quellen auf einem Ziel heißt also stillen Datenverlust (wer zuletzt
+    schreibt, gewinnt). Zwei Wege führen dorthin: ein erzwungenes Ausgabeformat
+    (``x.wav`` + ``x.flac`` -> beide ``x.mp3``) und mehrere ausgewählte
+    Quellordner mit gleich benannten Unterordnern.
+    """
+    by_target: Dict[str, List[str]] = {}
+    for src, dst in mapping.items():
+        by_target.setdefault(os.path.normcase(os.path.abspath(dst)), []).append(src)
+    return {t: sorted(srcs) for t, srcs in by_target.items() if len(srcs) > 1}
+
+
+def format_collisions(collisions: Dict[str, List[str]], limit: int = 5) -> str:
+    """Menschenlesbare Auflistung kollidierender Ziele (für CLI/GUI-Meldung)."""
+    lines = []
+    for target, sources in sorted(collisions.items())[:limit]:
+        lines.append(f"  {os.path.basename(target)} <- "
+                     + ", ".join(os.path.basename(s) for s in sources))
+    if len(collisions) > limit:
+        lines.append(f"  … und {len(collisions) - limit} weitere")
+    return "\n".join(lines)
+
+
+def exclude_under(files: List[str], directory: str) -> List[str]:
+    """Entfernt Dateien, die im angegebenen Ordner (oder darunter) liegen.
+
+    Verhindert, dass ein Lauf seinen eigenen Output von vorherigen Läufen als
+    Eingabe einsammelt, wenn der Zielordner im Quellordner liegt – sonst würde
+    die Verstärkung ein zweites Mal angewandt.
+    """
+    if not directory:
+        return list(files)
+    target = os.path.normcase(os.path.abspath(directory)) + os.sep
+    return [f for f in files
+            if not os.path.normcase(os.path.abspath(f)).startswith(target)]
+
+
+def infer_source_folder(files: List[str], bases: Optional[Dict[str, str]] = None) -> str:
     """Leitet einen Quellordner-Namen für den Log-Dateinamen ab."""
     if not files:
         return ""
+    if bases:
+        picked = {b for b in (bases.get(f) for f in files) if b}
+        if len(picked) == 1:
+            return os.path.basename(next(iter(picked)).rstrip(os.sep)) or ""
     if len(files) == 1:
         return os.path.basename(os.path.dirname(os.path.abspath(files[0])))
     try:
@@ -256,6 +359,9 @@ def run_batch(
                 fr = FileResult(input_path=f, output_path=output_mapping.get(f, ""),
                                 success=False, error=str(exc))
                 result.results.append(fr)
+                # Auch der Fehlschlag ist ein "Datei fertig"-Ereignis, sonst
+                # bliebe die Zeile in der UI ohne Rückmeldung stehen.
+                cb._file_done(fr)
                 cb._err(msg)
             done += 1
             cb._progress(done, total)

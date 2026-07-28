@@ -43,7 +43,12 @@ class CustomLineEdit(QLineEdit):
 
 
 class DropZone(QLabel):
-    """Drag&Drop-Feld, das unterstützte Audiodateien/Ordner einsammelt."""
+    """Drag&Drop-Feld für Audiodateien und Ordner.
+
+    Emittiert die **rohen** abgelegten Pfade (Ordner bleiben Ordner). Das
+    Einsammeln übernimmt ``batch.collect_selection`` – nur so bleibt die
+    Herkunft erhalten, aus der später die Zielstruktur gebildet wird.
+    """
 
     clicked = pyqtSignal()
     filesDropped = pyqtSignal(list)
@@ -99,15 +104,10 @@ class DropZone(QLabel):
 
     def dropEvent(self, event: QDropEvent):
         self.setStyleSheet(self._BASE_STYLE)
-        new_files = []
+        paths = []
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            if os.path.isdir(path):
-                for root, _dirs, files in os.walk(path):
-                    for file in files:
-                        if file.lower().endswith(SUPPORTED_EXTS):
-                            new_files.append(os.path.join(root, file))
-            elif path.lower().endswith(SUPPORTED_EXTS):
-                new_files.append(path)
-        if new_files:
-            self.filesDropped.emit(new_files)
+            if os.path.isdir(path) or path.lower().endswith(SUPPORTED_EXTS):
+                paths.append(path)
+        if paths:
+            self.filesDropped.emit(paths)

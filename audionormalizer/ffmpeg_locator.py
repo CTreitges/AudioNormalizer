@@ -64,20 +64,26 @@ def _is_valid(path: Optional[str]) -> bool:
         return False
 
 
-def _sibling_ffprobe(ffmpeg_path: str) -> Optional[str]:
-    """Sucht ffprobe neben einer ffmpeg-Binary."""
+def _sibling_ffprobe(ffmpeg_path: str, allow_path_lookup: bool) -> Optional[str]:
+    """Sucht ffprobe **neben** der gewählten ffmpeg-Binary.
+
+    Ein ffprobe aus dem PATH wird nur akzeptiert, wenn auch das ffmpeg von dort
+    stammt. Sonst entsteht ein Versions-Mix (z.B. gebündeltes ffmpeg 7.1 +
+    System-ffprobe 8.1.2), dessen Ausgaben nicht zwingend zusammenpassen. Ohne
+    passendes ffprobe bleibt es bei ``None`` – ``probe()`` parst dann die
+    ``ffmpeg -i``-Ausgabe, was für alle Formate abgedeckt und getestet ist.
+    """
     if not ffmpeg_path:
         return None
     base = os.path.dirname(ffmpeg_path) if os.path.isfile(ffmpeg_path) else ""
     cand = os.path.join(base, f"ffprobe{_EXE}") if base else ""
     if cand and os.path.isfile(cand):
         return cand
-    which = shutil.which("ffprobe")
-    return which
+    return shutil.which("ffprobe") if allow_path_lookup else None
 
 
 def _bundled_candidates() -> List[str]:
-    """Pfade zu mitgelieferten Binaries (PyInstaller / imageio-ffmpeg)."""
+    """Pfade zu Binaries, die mit der App ausgeliefert werden."""
     cands: List[str] = []
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
@@ -85,14 +91,17 @@ def _bundled_candidates() -> List[str]:
     # Neben der eigenen Executable (portable Distribution).
     exe_dir = os.path.dirname(os.path.abspath(sys.executable))
     cands.append(os.path.join(exe_dir, f"ffmpeg{_EXE}"))
-    # imageio-ffmpeg liefert eine eigene Binary mit.
+    return cands
+
+
+def _imageio_candidate() -> Optional[str]:
+    """Die von ``imageio-ffmpeg`` mitgelieferte Binary (bringt kein ffprobe mit)."""
     try:
         import imageio_ffmpeg  # type: ignore
 
-        cands.append(imageio_ffmpeg.get_ffmpeg_exe())
+        return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        pass
-    return cands
+        return None
 
 
 def _common_install_dirs() -> List[str]:
@@ -125,11 +134,19 @@ def locate(preferred: Optional[str] = None) -> Optional[FFmpegTools]:
         else:
             candidates.append(preferred)
 
+    # Mit der App ausgeliefertes FFmpeg zuerst – im gepackten Build ist das die
+    # einzige garantiert vorhandene Binary.
     candidates += _bundled_candidates()
 
-    path = shutil.which("ffmpeg")
-    if path:
-        candidates.append(path)
+    # Dann PATH: eine vollständige System-Installation bringt ffprobe mit und ist
+    # damit besser als die imageio-Binary, die nur ffmpeg enthält.
+    path_ffmpeg = shutil.which("ffmpeg")
+    if path_ffmpeg:
+        candidates.append(path_ffmpeg)
+
+    imageio = _imageio_candidate()
+    if imageio:
+        candidates.append(imageio)
 
     candidates += _common_install_dirs()
 
@@ -139,7 +156,10 @@ def locate(preferred: Optional[str] = None) -> Optional[FFmpegTools]:
             continue
         seen.add(cand)
         if _is_valid(cand):
-            return FFmpegTools(ffmpeg=cand, ffprobe=_sibling_ffprobe(cand))
+            from_path = bool(path_ffmpeg) and os.path.normcase(
+                os.path.abspath(cand)) == os.path.normcase(os.path.abspath(path_ffmpeg))
+            return FFmpegTools(ffmpeg=cand,
+                               ffprobe=_sibling_ffprobe(cand, allow_path_lookup=from_path))
     return None
 
 

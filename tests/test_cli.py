@@ -77,6 +77,78 @@ def test_run_returns_1_when_no_files(monkeypatch, tmp_path):
     assert rc == 1
 
 
+def _fake_ffmpeg(monkeypatch):
+    monkeypatch.setattr(cli.ffmpeg_locator, "locate",
+                        lambda *_a, **_k: FFmpegTools(ffmpeg="ffmpeg"))
+
+
+def test_run_aborts_on_format_collision(monkeypatch, tmp_path, capsys):
+    """``x.wav`` + ``x.flac`` mit --format mp3 -> Abbruch statt stillem Verlust."""
+    _fake_ffmpeg(monkeypatch)
+    for name in ("x.wav", "x.flac"):
+        (tmp_path / name).write_bytes(b"x")
+    rc = cli.run([str(tmp_path), "-o", str(tmp_path / "out"), "--format", "mp3"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "mehreren Quellen" in err and "x.mp3" in err
+
+
+def test_run_aborts_on_backup_collision(monkeypatch, tmp_path, capsys):
+    """Kollidierende Backups wären fatal: Original nicht wiederherstellbar."""
+    _fake_ffmpeg(monkeypatch)
+    for root in ("R1", "R2"):
+        d = tmp_path / root / "Album"
+        d.mkdir(parents=True)
+        (d / "a.mp3").write_bytes(b"x")
+    rc = cli.run([str(tmp_path / "R1"), str(tmp_path / "R2"),
+                  "--overwrite", "--backup-dir", str(tmp_path / "bak")])
+    assert rc == 1
+    assert "Backup-Pfade" in capsys.readouterr().err
+
+
+def test_run_skips_files_inside_output_dir(monkeypatch, tmp_path, capsys):
+    """Zielordner im Quellordner: früherer Output darf nicht erneut ran."""
+    _fake_ffmpeg(monkeypatch)
+    (tmp_path / "song.mp3").write_bytes(b"x")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "song.mp3").write_bytes(b"x")
+
+    captured = {}
+
+    def fake_batch(files, mapping, *a, **k):
+        captured["files"] = list(files)
+        return cli._batch.BatchResult()
+
+    monkeypatch.setattr(cli._batch, "run_batch", fake_batch)
+    cli.run([str(tmp_path), "-o", str(out), "--no-log"])
+    assert [os.path.basename(f) for f in captured["files"]] == ["song.mp3"]
+    assert os.path.dirname(captured["files"][0]) == str(tmp_path)
+    assert "übersprungen" in capsys.readouterr().out
+
+
+def test_run_writes_log_into_selected_output_dir(monkeypatch, tmp_path):
+    """Regression: das Protokoll landete in einem beliebigen Unterordner.
+
+    ``next(iter(set))`` über die Zielordner ist nicht deterministisch, sobald
+    Unterordner-Struktur erhalten bleibt.
+    """
+    _fake_ffmpeg(monkeypatch)
+    for sub in ("A", "B"):
+        d = tmp_path / "src" / sub
+        d.mkdir(parents=True)
+        (d / f"{sub}.mp3").write_bytes(b"x")
+    out = tmp_path / "out"
+
+    monkeypatch.setattr(cli._batch, "run_batch",
+                        lambda *a, **k: cli._batch.BatchResult(success_count=2))
+    seen = {}
+    monkeypatch.setattr(cli.logwriter, "write_log_file",
+                        lambda target_dir, *a, **k: seen.setdefault("dir", target_dir))
+    cli.run([str(tmp_path / "src"), "-o", str(out)])
+    assert seen["dir"] == str(out)
+
+
 def test_run_hybrid_needs_two_files(monkeypatch):
     monkeypatch.setattr(cli.ffmpeg_locator, "locate",
                         lambda *_a, **_k: FFmpegTools(ffmpeg="ffmpeg"))

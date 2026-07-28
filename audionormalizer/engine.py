@@ -228,6 +228,22 @@ def _run_ffmpeg(cmd: List[str], cancel: Optional[threading.Event]) -> str:
     return stderr
 
 
+# Marker der atomaren Temp-Dateien. Sie MÜSSEN die echte Endung tragen (sonst
+# erkennt FFmpeg das Output-Format nicht) – dadurch sähen sie nach einem
+# Absturz aber wie normale Audiodateien aus und würden beim nächsten Lauf
+# erneut normalisiert. Der führende Punkt hält sie aus der Sammlung heraus
+# (siehe ``batch.collect_audio_files``).
+TEMP_MARKER = ".part"
+
+
+def build_temp_path(output_path: str) -> str:
+    """Pfad der atomaren Temp-Datei im Zielordner (versteckt + eindeutig)."""
+    out_dir = os.path.dirname(output_path) or os.path.dirname(os.path.abspath(output_path))
+    base = os.path.basename(output_path)
+    ext = os.path.splitext(output_path)[1].lower()
+    return os.path.join(out_dir, f".{base}.{uuid.uuid4().hex[:8]}{TEMP_MARKER}{ext}")
+
+
 def normalize_file(
     file_path: str,
     output_path: str,
@@ -281,11 +297,7 @@ def normalize_file(
     result.applied_gain_db = gain
 
     # Atomar schreiben: erst in Temp-Datei im Zielordner, dann umbenennen.
-    # Die Temp-Datei MUSS die echte Endung behalten, sonst kann FFmpeg das
-    # Output-Format nicht erkennen ("Unable to choose an output format").
-    tmp_dir = out_dir or os.path.dirname(os.path.abspath(output_path))
-    tmp_base = os.path.basename(output_path)
-    tmp_path = os.path.join(tmp_dir, f".{tmp_base}.{uuid.uuid4().hex[:8]}.part{ext}")
+    tmp_path = build_temp_path(output_path)
     map_args = build_map_args(ext)
     metadata_args = build_metadata_args(ext, track_num, params.rekordbox)
     cmd = [

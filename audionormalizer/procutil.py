@@ -41,6 +41,7 @@ def run(cmd: Sequence[str], timeout: Optional[float] = None) -> subprocess.Compl
         encoding="utf-8",
         errors="replace",
         timeout=timeout,
+        stdin=subprocess.DEVNULL,
         **hidden_kwargs(),
     )
 
@@ -48,11 +49,18 @@ def run(cmd: Sequence[str], timeout: Optional[float] = None) -> subprocess.Compl
 def popen(cmd: Sequence[str]) -> subprocess.Popen:
     """``subprocess.Popen`` mit versteckten Fenstern und robustem Decoding.
 
+    ``stdin`` wird bewusst auf DEVNULL gelegt: ohne das erbt jeder FFmpeg-Prozess
+    das Terminal-stdin des Aufrufers. Bei einem Stapellauf greifen dann mehrere
+    parallele Prozesse gleichzeitig auf dieselbe Konsole zu – FFmpeg liest von
+    dort seine interaktiven Tastenkommandos, was den Lauf blockieren und die
+    Eingabe des Aufrufers verschlucken kann.
+
     Wird für abbrechbare Läufe verwendet (siehe ``run_cancellable``)."""
     return subprocess.Popen(
         list(cmd),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         text=True,
         encoding="utf-8",
         errors="replace",

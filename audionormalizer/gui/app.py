@@ -11,7 +11,7 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QListWidget, QMainWindow, QMenu, QMessageBox,
-    QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from .. import __app_name__, ffmpeg_locator
@@ -78,11 +78,27 @@ QCheckBox { color: #333; font-weight: normal; }
 _OPEN_FILTER = "Audio Files (" + " ".join(f"*{e}" for e in SUPPORTED_EXTS) + ")"
 
 
+def _shorten_path(path: str, keep: int = 2) -> str:
+    """Kürzt lange Binary-Pfade auf die letzten Segmente (voller Pfad im Tooltip).
+
+    Die Statuszeile steht über den Eingabefeldern – ein vierzeiliger Pfad würde
+    ihnen den Platz nehmen.
+    """
+    parts = os.path.normpath(path).split(os.sep)
+    if len(parts) <= keep + 1:
+        return path
+    return "…" + os.sep + os.sep.join(parts[-keep:])
+
+
 class NormalizerApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(__app_name__)
-        self.setMinimumSize(700, 720)
+        # Nur die Breite festnageln. Die Mindesthöhe überlässt man dem Layout:
+        # eine feste Zahl war kleiner als der tatsächliche Bedarf im Loudness-
+        # und Hybrid-Modus, wodurch sich Eingabefelder und Drop-Zone überlappten.
+        self.setMinimumWidth(700)
+        self.resize(760, 830)
 
         icon_path = self._resource_path("icon.ico")
         if os.path.exists(icon_path):
@@ -91,6 +107,10 @@ class NormalizerApp(QMainWindow):
         self.settings = QSettings("ChrisSoftware", "AudioNormalizer")
 
         self.all_files: List[str] = []
+        # Herkunft je Datei (ausgewählter Ordner), damit die Unterordner-Struktur
+        # im Ziel erhalten bleibt – siehe batch.Selection.
+        self.file_bases: Dict[str, str] = {}
+        self.list_rows: Dict[str, int] = {}      # Datei -> Zeile in der Liste
         self.tools: Optional[FFmpegTools] = None
         self.worker: Optional[NormalizeWorker] = None
         self.current_source_folder_name = ""
@@ -148,6 +168,11 @@ class NormalizerApp(QMainWindow):
         mode_row.addWidget(QLabel("Modus:"))
         self.combo_mode = QComboBox()
         self.combo_mode.addItems([m.label for m in (Mode.PEAK, Mode.LOUDNESS, Mode.HYBRID)])
+        # Ohne das schneidet das Stylesheet-Padding den längsten Modusnamen ab.
+        self.combo_mode.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.combo_mode.setMinimumContentsLength(
+            max(len(m.label) for m in Mode))
         self.combo_mode.currentIndexChanged.connect(self._toggle_params)
         mode_row.addWidget(self.combo_mode)
         mode_row.addStretch()
@@ -193,13 +218,21 @@ class NormalizerApp(QMainWindow):
         self.chk_overwrite.stateChanged.connect(self._save_overwrite_setting)
         settings_layout.addWidget(self.chk_overwrite)
 
+        # Die Einstellungen dürfen nie unter ihre natürliche Höhe gedrückt
+        # werden – sonst quetscht die (expandierende) Dateiliste sie zusammen,
+        # bis die Eingabefelder nur noch als Streifen sichtbar sind. "Minimum"
+        # statt "Fixed": die Gruppe muss beim Moduswechsel noch wachsen können
+        # (Hybrid braucht zwei Zeilen, Peak nur eine).
+        settings_group.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                     QSizePolicy.Policy.Minimum)
+        self.settings_group = settings_group
         layout.addWidget(settings_group)
         self._toggle_params()
 
         # --- Drop Zone + Liste ---
         self.drop_zone = DropZone(self)
         self.drop_zone.clicked.connect(self._select_files)
-        self.drop_zone.filesDropped.connect(self.add_files)
+        self.drop_zone.filesDropped.connect(self.add_paths)
         layout.addWidget(self.drop_zone)
 
         lst_label = QLabel("Ausgewählte Dateien:")
@@ -207,7 +240,8 @@ class NormalizerApp(QMainWindow):
         layout.addWidget(lst_label)
 
         self.file_list = QListWidget()
-        layout.addWidget(self.file_list)
+        # Nur die Dateiliste wächst mit der Fenstergröße.
+        layout.addWidget(self.file_list, 1)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -250,16 +284,32 @@ class NormalizerApp(QMainWindow):
         preferred = self.edit_ffmpeg.text().strip() or None
         self.tools = ffmpeg_locator.locate(preferred)
         if self.tools:
-            probe = self.tools.ffprobe or "(ohne ffprobe – ffmpeg-Parsing)"
-            self.lbl_ffmpeg_status.setText(
-                f"✓ FFmpeg: {self.tools.ffmpeg}\n   FFprobe: {probe}"
-            )
-            self.lbl_ffmpeg_status.setStyleSheet("font-size: 11px; color: #157347;")
+            probe = (_shorten_path(self.tools.ffprobe) if self.tools.ffprobe
+                     else "(ohne ffprobe – ffmpeg-Parsing)")
+            text = f"✓ FFmpeg: {_shorten_path(self.tools.ffmpeg)}   ·   FFprobe: {probe}"
+            style = "font-size: 11px; color: #157347;"
+            # Ein eingetragener, aber unbrauchbarer Pfad darf nicht unter einem
+            # grünen Haken verschwinden – sonst wundert man sich, warum die
+            # eigene FFmpeg-Version nicht verwendet wird.
+            if preferred and not self._uses_preferred(preferred):
+                text = f"⚠ Eingetragener Pfad nicht nutzbar – automatisch erkannt:\n{text}"
+                style = "font-size: 11px; color: #9a6700;"
+            self.lbl_ffmpeg_status.setText(text)
+            self.lbl_ffmpeg_status.setStyleSheet(style)
+            self.lbl_ffmpeg_status.setToolTip(ffmpeg_locator.describe(self.tools))
         else:
             self.lbl_ffmpeg_status.setText(
                 "✗ FFmpeg nicht gefunden. Bitte Pfad angeben oder FFmpeg installieren."
             )
             self.lbl_ffmpeg_status.setStyleSheet("font-size: 11px; color: #b02a37;")
+
+    def _uses_preferred(self, preferred: str) -> bool:
+        """Ob die gefundene Binary tatsächlich die eingetragene ist."""
+        if not self.tools:
+            return False
+        found = os.path.normcase(os.path.abspath(self.tools.ffmpeg))
+        wanted = os.path.normcase(os.path.abspath(preferred))
+        return found == wanted or os.path.dirname(found) == wanted
 
     def _on_ffmpeg_edited(self):
         self.settings.setValue("ffmpeg_path", self.edit_ffmpeg.text().strip())
@@ -329,27 +379,53 @@ class NormalizerApp(QMainWindow):
         if action == a_files:
             files, _ = QFileDialog.getOpenFileNames(self, "Audio-Dateien auswählen", "", _OPEN_FILTER)
             if files:
-                self.add_files(files)
+                self.add_paths(files)
         elif action == a_folder:
             folder = QFileDialog.getExistingDirectory(self, "Ordner auswählen")
             if folder:
                 self.current_source_folder_name = os.path.basename(folder)
-                self.add_files(_batch.collect_audio_files([folder]))
+                self.add_paths([folder])
 
-    def add_files(self, files: List[str]):
+    def add_paths(self, paths: List[str]):
+        """Nimmt Dateien UND Ordner an und merkt sich die Herkunft der Struktur."""
+        selection = _batch.collect_selection(paths)
+        if not selection.files:
+            QMessageBox.information(
+                self, "Keine Audiodateien",
+                "In der Auswahl wurden keine unterstützten Audiodateien gefunden.\n\n"
+                "Unterstützt: " + ", ".join(e.lstrip(".") for e in SUPPORTED_EXTS))
+            return
+        self.add_files(selection.files, selection.bases)
+
+    def add_files(self, files: List[str], bases: Optional[Dict[str, str]] = None):
         if files and not self.current_source_folder_name:
             self.current_source_folder_name = os.path.basename(os.path.dirname(files[0]))
         for f in files:
             if f not in self.all_files:
                 self.all_files.append(f)
-                parent = os.path.basename(os.path.dirname(f))
-                display = os.path.join(parent, os.path.basename(f)) if parent else os.path.basename(f)
-                self.file_list.addItem(display)
+                self.file_bases[f] = (bases or {}).get(f, "")
+                self.list_rows[f] = self.file_list.count()
+                self.file_list.addItem(self._display_name(f))
         if self.all_files:
             self.btn_normalize.setEnabled(True)
 
+    def _display_name(self, f: str) -> str:
+        """Zeigt den Pfad relativ zum gewählten Ordner (sonst Ordner/Datei)."""
+        base = self.file_bases.get(f) or ""
+        if base:
+            try:
+                rel = os.path.relpath(os.path.abspath(f), base)
+                if not rel.startswith(".."):
+                    return rel
+            except ValueError:
+                pass
+        parent = os.path.basename(os.path.dirname(f))
+        return os.path.join(parent, os.path.basename(f)) if parent else os.path.basename(f)
+
     def clear_files(self):
         self.all_files = []
+        self.file_bases = {}
+        self.list_rows = {}
         self.file_list.clear()
         self.btn_normalize.setEnabled(False)
         self.progress_bar.setVisible(False)
@@ -396,6 +472,7 @@ class NormalizerApp(QMainWindow):
         params = self._gather_params()
 
         # Output-Mapping bestimmen.
+        files = list(self.all_files)
         backup_mapping = None
         if self.chk_overwrite.isChecked():
             # Überschreiben-Modus: Backup-Ordner abfragen, Originale ersetzen.
@@ -403,11 +480,15 @@ class NormalizerApp(QMainWindow):
                 self, "Backup-Ordner für Originaldateien wählen")
             if not backup_dir:
                 return
-            mapping = {f: f for f in self.all_files}
-            backup_mapping = _batch.build_output_mapping(self.all_files, backup_dir)
-            self.current_target_dir = os.path.dirname(self.all_files[0])
-        elif len(self.all_files) == 1:
-            src = self.all_files[0]
+            mapping = {f: f for f in files}
+            backup_mapping = _batch.build_output_mapping(files, backup_dir, self.file_bases)
+            # Kollidierende Backup-Pfade wären fatal: das erste Backup ginge
+            # verloren, beide Originale würden trotzdem überschrieben.
+            if not self._check_collisions(backup_mapping, "Backup-Pfad"):
+                return
+            self.current_target_dir = backup_dir
+        elif len(files) == 1:
+            src = files[0]
             ext = os.path.splitext(src)[1]
             target, _ = QFileDialog.getSaveFileName(
                 self, "Speichern unter", src, f"Audio Files (*{ext})")
@@ -419,21 +500,71 @@ class NormalizerApp(QMainWindow):
             target_dir = QFileDialog.getExistingDirectory(self, "Zielordner wählen")
             if not target_dir:
                 return
+            # Output eines früheren Laufs nicht erneut verstärken.
+            kept = _batch.exclude_under(files, target_dir)
+            if len(kept) != len(files):
+                QMessageBox.information(
+                    self, "Dateien übersprungen",
+                    f"{len(files) - len(kept)} Datei(en) liegen im Zielordner und "
+                    "stammen vermutlich aus einem früheren Lauf.\n"
+                    "Sie werden übersprungen, damit die Verstärkung nicht doppelt "
+                    "angewandt wird.")
+                files = kept
+                if not files:
+                    return
             self.current_target_dir = target_dir
-            mapping = _batch.build_output_mapping(self.all_files, target_dir)
+            mapping = _batch.build_output_mapping(files, target_dir, self.file_bases)
+            if not self._check_collisions(mapping, "Zielpfad"):
+                return
 
         self.current_output_mapping = mapping
         self.current_params = params
+        self._reset_row_status(files)
 
         self._set_running(True)
-        self.worker = NormalizeWorker(self.all_files, mapping, params, self.tools,
+        self.worker = NormalizeWorker(files, mapping, params, self.tools,
                                       backup_mapping=backup_mapping)
         self.worker.phase.connect(self._on_phase)
         self.worker.progress.connect(self._on_progress)
+        self.worker.file_done.connect(self._on_file_done)
         self.worker.error.connect(self._on_worker_error)
         self.worker.done.connect(self._on_done)
         self._error_dialogs = 0
         self.worker.start()
+
+    def _check_collisions(self, mapping: Dict[str, str], what: str) -> bool:
+        """``False`` => Lauf nicht starten (mehrere Quellen auf einem Ziel)."""
+        collisions = _batch.find_target_collisions(mapping)
+        if not collisions:
+            return True
+        QMessageBox.critical(
+            self, "Namenskonflikt",
+            f"{len(collisions)} {what}(e) werden von mehreren Quelldateien belegt:\n\n"
+            + _batch.format_collisions(collisions)
+            + "\n\nDer Lauf wurde nicht gestartet – sonst würde eine Datei die "
+              "andere überschreiben.")
+        return False
+
+    def _reset_row_status(self, files: List[str]):
+        """Setzt die Statuszeichen der Liste für einen neuen Lauf zurück."""
+        for f in files:
+            row = self.list_rows.get(f)
+            if row is not None and row < self.file_list.count():
+                self.file_list.item(row).setText(self._display_name(f))
+
+    def _on_file_done(self, res):
+        """Markiert die fertige Datei in der Liste (Haken bzw. Kreuz)."""
+        row = self.list_rows.get(res.input_path)
+        if row is None or row >= self.file_list.count():
+            return
+        item = self.file_list.item(row)
+        name = self._display_name(res.input_path)
+        if res.success:
+            gain = f"{res.applied_gain_db:+.2f} dB" if res.applied_gain_db is not None else ""
+            item.setText(f"✓  {name}   [{res.mode_used}, {gain}]")
+        else:
+            item.setText(f"✗  {name}   [Fehler]")
+        self.file_list.scrollToItem(item)
 
     def _set_running(self, running: bool):
         self.btn_clear.setEnabled(not running)
@@ -471,7 +602,9 @@ class NormalizerApp(QMainWindow):
         self._set_running(False)
         if result.success_count > 0 and self.current_target_dir and self.current_params:
             logwriter.write_log_file(
-                self.current_target_dir, self.current_source_folder_name,
+                self.current_target_dir,
+                self.current_source_folder_name
+                or _batch.infer_source_folder(self.all_files, self.file_bases),
                 self.current_params, result.success_count, result.error_count,
                 datetime.now(),
             )

@@ -40,6 +40,20 @@ def test_parse_loudnorm_silence_sentinel_becomes_none():
         parse_loudnorm_json(silent)
 
 
+def test_parse_loudnorm_ignores_foreign_brace_block():
+    """Ein anderer ``{...}``-Block auf stderr darf die Messung nicht kapern."""
+    noisy = '[matroska @ 0] { "codec" : "flac" }\n' + LOUDNORM_STDERR
+    m = parse_loudnorm_json(noisy)
+    assert m.lufs == pytest.approx(-18.52)
+
+
+def test_parse_loudnorm_takes_last_measurement_block():
+    """Bei zwei Messblöcken (z.B. mehrere Filter) zählt der letzte."""
+    first = '{ "input_i" : "-30.00", "input_tp" : "-9.00" }'
+    m = parse_loudnorm_json(first + "\n" + LOUDNORM_STDERR)
+    assert m.lufs == pytest.approx(-18.52)
+
+
 def test_parse_volumedetect_ok():
     assert parse_volumedetect(VOLUMEDETECT_STDERR) == pytest.approx(-4.7)
 

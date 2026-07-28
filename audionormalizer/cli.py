@@ -81,7 +81,8 @@ def _apply_suffix_and_format(path: str, suffix: str, out_format: Optional[str]) 
 
 
 def _plan_mapping(files: List[str], output: str, suffix: str,
-                  out_format: Optional[str]) -> Dict[str, str]:
+                  out_format: Optional[str],
+                  bases: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Erzeugt das Quelle->Ziel-Mapping für die CLI."""
     output_is_file = (
         len(files) == 1
@@ -91,11 +92,29 @@ def _plan_mapping(files: List[str], output: str, suffix: str,
         out = _apply_suffix_and_format(output, suffix, out_format)
         return {files[0]: out}
 
-    mapping = _batch.build_output_mapping(files, output)
+    mapping = _batch.build_output_mapping(files, output, bases)
     return {
         src: _apply_suffix_and_format(dst, suffix, out_format)
         for src, dst in mapping.items()
     }
+
+
+def _abort_on_collisions(mapping: Dict[str, str], what: str) -> bool:
+    """Meldet kollidierende Zielpfade. ``True`` => Lauf abbrechen.
+
+    Abbruch statt Auto-Umbenennen: bei parallelem Schreiben auf denselben Pfad
+    verliert eine Quelle still ihr Ergebnis; im Backup-Fall wäre sogar das
+    Original unwiederbringlich.
+    """
+    collisions = _batch.find_target_collisions(mapping)
+    if not collisions:
+        return False
+    print(f"FEHLER: {len(collisions)} {what} werden von mehreren Quellen belegt:",
+          file=sys.stderr)
+    print(_batch.format_collisions(collisions), file=sys.stderr)
+    print("Abbruch – sonst würde eine Datei die andere überschreiben. "
+          "Mit --suffix oder ohne --format erneut versuchen.", file=sys.stderr)
+    return True
 
 
 def _warn_overwrite(mapping: Dict[str, str]) -> List[str]:
@@ -118,7 +137,18 @@ def run(argv: Optional[List[str]] = None) -> int:
     if args.verbose:
         print(ffmpeg_locator.describe(tools))
 
-    files = _batch.collect_audio_files(args.inputs)
+    selection = _batch.collect_selection(args.inputs)
+    files, bases = selection.files, selection.bases
+
+    # Eigenen Output früherer Läufe nicht erneut verstärken, wenn der Zielordner
+    # im Quellordner liegt.
+    if args.output and not args.overwrite:
+        kept = _batch.exclude_under(files, args.output)
+        if len(kept) != len(files):
+            print(f"HINWEIS: {len(files) - len(kept)} Datei(en) im Zielordner "
+                  f"übersprungen (Output eines früheren Laufs).")
+            files = kept
+
     if not files:
         print("FEHLER: Keine unterstützten Audiodateien gefunden.", file=sys.stderr)
         return 1
@@ -146,13 +176,19 @@ def run(argv: Optional[List[str]] = None) -> int:
             print("FEHLER: --overwrite erfordert --backup-dir.", file=sys.stderr)
             return 1
         mapping = {f: f for f in files}
-        backup_mapping = _batch.build_output_mapping(files, args.backup_dir)
+        backup_mapping = _batch.build_output_mapping(files, args.backup_dir, bases)
+        # Zwei Originale auf einem Backup-Pfad => das erste Backup wäre weg,
+        # beide Originale würden trotzdem überschrieben. Harter Abbruch.
+        if _abort_on_collisions(backup_mapping, "Backup-Pfade"):
+            return 1
     else:
         if not args.output:
             print("FEHLER: -o/--output ist erforderlich (außer mit --overwrite).",
                   file=sys.stderr)
             return 1
-        mapping = _plan_mapping(files, args.output, args.suffix, args.out_format)
+        mapping = _plan_mapping(files, args.output, args.suffix, args.out_format, bases)
+        if _abort_on_collisions(mapping, "Zielpfade"):
+            return 1
         for src in _warn_overwrite(mapping):
             print(f"HINWEIS: Ziel überschreibt Quelle: {src}")
 
@@ -190,9 +226,16 @@ def run(argv: Optional[List[str]] = None) -> int:
           + (", abgebrochen" if result.cancelled else ""))
 
     if result.success_count > 0 and not args.no_log:
-        target_dir = next(iter(out_dirs), os.path.dirname(next(iter(mapping.values()))))
+        # Deterministisch: das Protokoll gehört in den ausgewählten Zielordner,
+        # nicht in einen beliebigen Unterordner aus einem Set.
+        if args.overwrite:
+            log_dir = args.backup_dir
+        elif os.path.splitext(args.output)[1].lower() in SUPPORTED_EXTS:
+            log_dir = os.path.dirname(os.path.abspath(args.output))
+        else:
+            log_dir = args.output
         log_path = logwriter.write_log_file(
-            target_dir, _batch.infer_source_folder(files), params,
+            log_dir, _batch.infer_source_folder(files, bases), params,
             result.success_count, result.error_count, datetime.now(),
         )
         if log_path and args.verbose:

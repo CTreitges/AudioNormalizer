@@ -21,12 +21,29 @@ _RE_JSON = re.compile(r"\{[^{}]*\}", re.DOTALL)
 _RE_MAXVOL = re.compile(r"max_volume:\s*([\-\d.]+)\s*dB")
 
 
+def _extract_loudnorm_block(stderr: str) -> Optional[dict]:
+    """Sucht gezielt den loudnorm-Block, nicht irgendeinen ``{...}`` auf stderr.
+
+    Andere Filter und Fehlermeldungen können ebenfalls geschweifte Klammern
+    ausgeben; wird davon der erste Treffer genommen, schlägt die Messung fehl
+    oder liefert Unsinn. Maßgeblich ist der letzte Block mit ``input_i``.
+    """
+    found = None
+    for match in _RE_JSON.finditer(stderr or ""):
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and "input_i" in data:
+            found = data
+    return found
+
+
 def parse_loudnorm_json(stderr: str) -> Measurement:
     """Extrahiert LUFS + True Peak aus dem loudnorm-JSON-Block auf stderr."""
-    match = _RE_JSON.search(stderr or "")
-    if not match:
+    data = _extract_loudnorm_block(stderr)
+    if data is None:
         raise ValueError("Kein loudnorm-JSON im FFmpeg-Output gefunden.")
-    data = json.loads(match.group(0))
 
     def _f(key: str) -> Optional[float]:
         raw = data.get(key)
@@ -62,7 +79,7 @@ def measure_loudness(
 ) -> Measurement:
     """Misst integrierte LUFS + True Peak (ein voller Decode-Pass, abbrechbar)."""
     rc, _out, err = run_cancellable([
-        tools.ffmpeg, "-hide_banner", "-nostats", "-i", file_path,
+        tools.ffmpeg, "-hide_banner", "-nostats", "-nostdin", "-i", file_path,
         "-af", "loudnorm=print_format=json",
         "-vn", "-sn", "-dn", "-f", "null", "-",
     ], cancel)
@@ -80,7 +97,7 @@ def measure_sample_peak(
 ) -> float:
     """Misst den Sample-Peak via volumedetect (ein voller Decode-Pass, abbrechbar)."""
     rc, _out, err = run_cancellable([
-        tools.ffmpeg, "-hide_banner", "-nostats", "-i", file_path,
+        tools.ffmpeg, "-hide_banner", "-nostats", "-nostdin", "-i", file_path,
         "-af", "volumedetect", "-vn", "-sn", "-dn", "-f", "null", "-",
     ], cancel)
     if rc != 0:

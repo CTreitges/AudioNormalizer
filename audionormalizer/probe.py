@@ -165,7 +165,7 @@ def probe(file_path: str, tools: FFmpegTools) -> AudioInfo:
 
     # Fallback / Primärpfad ohne ffprobe: ffmpeg -i parsen.
     try:
-        res = run([tools.ffmpeg, "-hide_banner", "-i", file_path])
+        res = run([tools.ffmpeg, "-hide_banner", "-nostdin", "-i", file_path])
         # ffmpeg ohne Output-Datei liefert Exit != 0, aber die Stream-Infos
         # stehen trotzdem auf stderr.
         return parse_ffmpeg_stream_info(res.stderr or "")
