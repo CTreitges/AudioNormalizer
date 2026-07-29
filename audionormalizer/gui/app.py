@@ -480,12 +480,32 @@ class NormalizerApp(QMainWindow):
                 self, "Backup-Ordner für Originaldateien wählen")
             if not backup_dir:
                 return
+            # Im Backup-Ordner liegen unveränderte Originale eines früheren
+            # Laufs – die einzusammeln würde das Sicherheitsnetz normalisieren.
+            kept = _batch.exclude_under(files, backup_dir)
+            if len(kept) != len(files):
+                QMessageBox.information(
+                    self, "Dateien übersprungen",
+                    f"{len(files) - len(kept)} Datei(en) liegen im Backup-Ordner "
+                    "und stammen aus einem früheren Lauf.\n"
+                    "Sie werden übersprungen, damit die Sicherungen unverändert "
+                    "bleiben.")
+                files = kept
+                if not files:
+                    return
             mapping = {f: f for f in files}
             backup_mapping = _batch.build_output_mapping(files, backup_dir, self.file_bases)
             # Kollidierende Backup-Pfade wären fatal: das erste Backup ginge
             # verloren, beide Originale würden trotzdem überschrieben.
             if not self._check_collisions(backup_mapping, "Backup-Pfad"):
                 return
+            already = _batch.existing_backups(backup_mapping)
+            if already:
+                QMessageBox.information(
+                    self, "Backups vorhanden",
+                    f"{len(already)} Backup(s) liegen bereits im gewählten Ordner "
+                    "und bleiben unverändert.\n\nSie sichern das echte Original – "
+                    "würden sie überschrieben, ginge es verloren.")
             self.current_target_dir = backup_dir
         elif len(files) == 1:
             src = files[0]

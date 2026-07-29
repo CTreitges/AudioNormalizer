@@ -1,7 +1,62 @@
+import os
+
 import pytest
 
 from audionormalizer import engine
 from audionormalizer.models import AudioInfo, Measurement, Mode, NormalizeParams
+
+
+# ------------------------------ Backup-Schutz ----------------------------- #
+def test_backup_never_overwrites_an_existing_one(tmp_path, monkeypatch):
+    """Regression: beim zweiten Lauf ueber dieselben Dateien ist die Quelle
+    bereits normalisiert. Ein Ueberschreiben des Backups haette das echte
+    Original durch dessen bearbeitete Fassung ersetzt - unwiederbringlich.
+    """
+    src = tmp_path / "song.wav"
+    src.write_bytes(b"BEARBEITET")
+    backup = tmp_path / "bak" / "song.wav"
+    backup.parent.mkdir()
+    backup.write_bytes(b"ORIGINAL")          # Backup aus Lauf 1
+
+    # Verarbeitung selbst wegmocken - hier zaehlt nur der Backup-Pfad.
+    monkeypatch.setattr(engine, "probe", lambda *a, **k: AudioInfo())
+    monkeypatch.setattr(engine._measure, "measure_sample_peak",
+                        lambda *a, **k: -6.0)
+    monkeypatch.setattr(engine, "_run_ffmpeg", lambda cmd, cancel: "")
+    monkeypatch.setattr(engine.os, "replace", lambda a, b: None)
+
+    engine.normalize_file(str(src), str(src), NormalizeParams(mode=Mode.PEAK),
+                          engine.FFmpegTools(ffmpeg="ffmpeg"),
+                          backup_path=str(backup))
+    assert backup.read_bytes() == b"ORIGINAL"
+
+
+def test_backup_is_created_when_missing(tmp_path, monkeypatch):
+    src = tmp_path / "song.wav"
+    src.write_bytes(b"ORIGINAL")
+    backup = tmp_path / "bak" / "song.wav"
+
+    monkeypatch.setattr(engine, "probe", lambda *a, **k: AudioInfo())
+    monkeypatch.setattr(engine._measure, "measure_sample_peak",
+                        lambda *a, **k: -6.0)
+    monkeypatch.setattr(engine, "_run_ffmpeg", lambda cmd, cancel: "")
+    monkeypatch.setattr(engine.os, "replace", lambda a, b: None)
+
+    engine.normalize_file(str(src), str(src), NormalizeParams(mode=Mode.PEAK),
+                          engine.FFmpegTools(ffmpeg="ffmpeg"),
+                          backup_path=str(backup))
+    assert backup.read_bytes() == b"ORIGINAL"
+
+
+def test_temp_path_is_hidden_and_keeps_extension():
+    """Die Temp-Datei braucht die echte Endung (FFmpeg-Formaterkennung), darf
+    aber deswegen beim naechsten Lauf nicht als Eingabe gelten -> Punktpraefix.
+    """
+    tmp = engine.build_temp_path(os.path.join("out", "song.flac"))
+    name = os.path.basename(tmp)
+    assert name.startswith(".")
+    assert name.endswith(".flac")
+    assert engine.TEMP_MARKER + "." in name
 
 
 # --------------------------- Modus-Entscheidung --------------------------- #

@@ -127,6 +127,28 @@ def test_run_skips_files_inside_output_dir(monkeypatch, tmp_path, capsys):
     assert "übersprungen" in capsys.readouterr().out
 
 
+def test_run_skips_files_inside_backup_dir(monkeypatch, tmp_path, capsys):
+    """Backup-Ordner im Quellordner: der zweite Lauf darf die Sicherungen des
+    ersten nicht als Eingabe einsammeln - sonst normalisiert er das Sicherheitsnetz.
+    """
+    _fake_ffmpeg(monkeypatch)
+    (tmp_path / "song.mp3").write_bytes(b"x")
+    bak = tmp_path / "bak"
+    bak.mkdir()
+    (bak / "song.mp3").write_bytes(b"x")            # Original aus Lauf 1
+
+    captured = {}
+
+    def fake_batch(files, mapping, *a, **k):
+        captured["files"] = list(files)
+        return cli._batch.BatchResult()
+
+    monkeypatch.setattr(cli._batch, "run_batch", fake_batch)
+    cli.run([str(tmp_path), "--overwrite", "--backup-dir", str(bak), "--no-log"])
+    assert [os.path.dirname(f) for f in captured["files"]] == [str(tmp_path)]
+    assert "Backup-Ordner" in capsys.readouterr().out
+
+
 def test_run_writes_log_into_selected_output_dir(monkeypatch, tmp_path):
     """Regression: das Protokoll landete in einem beliebigen Unterordner.
 

@@ -11,7 +11,11 @@ import pytest
 # Kein Fenster oeffnen - laeuft so auch in der CI.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PyQt6")
+# Das Untermodul pruefen, nicht nur das Paket: "import PyQt6" gelingt auch auf
+# einem nackten Runner, erst QtWidgets braucht die Qt-Systembibliotheken
+# (libEGL/libGL). Ein Fehlschlag auf Modulebene waere ein Collection-Error und
+# damit ein roter Build statt eines sauberen Skips.
+pytest.importorskip("PyQt6.QtWidgets")
 from PyQt6.QtWidgets import QApplication            # noqa: E402
 
 from audionormalizer.gui.app import NormalizerApp   # noqa: E402
@@ -20,7 +24,10 @@ from audionormalizer.models import FileResult       # noqa: E402
 
 @pytest.fixture(scope="module")
 def qapp():
-    app = QApplication.instance() or QApplication([])
+    try:
+        app = QApplication.instance() or QApplication([])
+    except Exception as exc:                        # keine nutzbare Qt-Plattform
+        pytest.skip(f"Qt-Plattform nicht verfuegbar: {exc}")
     yield app
 
 

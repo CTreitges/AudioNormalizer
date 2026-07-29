@@ -162,6 +162,16 @@ def format_collisions(collisions: Dict[str, List[str]], limit: int = 5) -> str:
     return "\n".join(lines)
 
 
+def existing_backups(backup_mapping: Dict[str, str]) -> List[str]:
+    """Backup-Pfade, die es schon gibt (aus einem früheren Lauf).
+
+    Sie werden bewusst nicht überschrieben – siehe ``engine.normalize_file``.
+    Der Aufrufer soll das aber melden, damit niemand ein Backup des aktuellen
+    Zustands erwartet und dann eines vom letzten Mal vorfindet.
+    """
+    return sorted(dst for dst in backup_mapping.values() if os.path.exists(dst))
+
+
 def exclude_under(files: List[str], directory: str) -> List[str]:
     """Entfernt Dateien, die im angegebenen Ordner (oder darunter) liegen.
 

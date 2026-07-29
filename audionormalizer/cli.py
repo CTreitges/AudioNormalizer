@@ -140,13 +140,17 @@ def run(argv: Optional[List[str]] = None) -> int:
     selection = _batch.collect_selection(args.inputs)
     files, bases = selection.files, selection.bases
 
-    # Eigenen Output früherer Läufe nicht erneut verstärken, wenn der Zielordner
-    # im Quellordner liegt.
-    if args.output and not args.overwrite:
-        kept = _batch.exclude_under(files, args.output)
+    # Eigenen Output früherer Läufe nicht erneut verstärken, wenn Ziel- bzw.
+    # Backup-Ordner im Quellordner liegen. Im Überschreiben-Modus ist der
+    # Backup-Ordner der kritische Fall: dort liegen unveränderte Originale –
+    # würden die eingesammelt, normalisierte der Lauf das Sicherheitsnetz.
+    skip_dir = args.backup_dir if args.overwrite else args.output
+    if skip_dir:
+        kept = _batch.exclude_under(files, skip_dir)
         if len(kept) != len(files):
-            print(f"HINWEIS: {len(files) - len(kept)} Datei(en) im Zielordner "
-                  f"übersprungen (Output eines früheren Laufs).")
+            what = "Backup-Ordner" if args.overwrite else "Zielordner"
+            print(f"HINWEIS: {len(files) - len(kept)} Datei(en) im {what} "
+                  f"übersprungen (Ergebnis eines früheren Laufs).")
             files = kept
 
     if not files:
@@ -181,6 +185,10 @@ def run(argv: Optional[List[str]] = None) -> int:
         # beide Originale würden trotzdem überschrieben. Harter Abbruch.
         if _abort_on_collisions(backup_mapping, "Backup-Pfade"):
             return 1
+        already = _batch.existing_backups(backup_mapping)
+        if already:
+            print(f"HINWEIS: {len(already)} Backup(s) existieren bereits und bleiben "
+                  f"unverändert (sie sichern das echte Original).")
     else:
         if not args.output:
             print("FEHLER: -o/--output ist erforderlich (außer mit --overwrite).",

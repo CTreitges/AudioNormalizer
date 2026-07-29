@@ -56,7 +56,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb-cursor0 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxkbcommon-x11-0
+          # libegl1/libgl1 zusaetzlich zu den xcb-Paketen: ohne sie scheitert schon
+          # "import PyQt6.QtWidgets", womit die GUI-Tests hier nie liefen.
+          sudo apt-get install -y libxcb-cursor0 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxkbcommon-x11-0 libegl1 libgl1
 
       - name: Run tests
         run: |

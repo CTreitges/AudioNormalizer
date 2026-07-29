@@ -264,8 +264,11 @@ def normalize_file(
     if cancel is not None and cancel.is_set():
         raise CancelledError()
 
-    # Backup VOR jeglicher Verarbeitung anlegen.
-    if backup_path:
+    # Backup VOR jeglicher Verarbeitung anlegen – aber ein bereits vorhandenes
+    # NIE überschreiben: bei einem zweiten Lauf über dieselben Dateien ist die
+    # Quelle schon normalisiert. Ein Überschreiben würde das echte Original
+    # durch dessen bearbeitete Fassung ersetzen und wäre unwiederbringlich.
+    if backup_path and not os.path.exists(backup_path):
         bdir = os.path.dirname(backup_path)
         if bdir:
             os.makedirs(bdir, exist_ok=True)
